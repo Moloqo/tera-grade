@@ -2544,7 +2544,7 @@ function parseAutoDetectResult(rawObj) {
   /* estimates bersifat boleh kosong (aturan 7): bila kosong / 0 semua,
      harga dibiarkan manual — bukan alasan menggagalkan deteksi.
      Bila ada isinya, setiap angka yang hadir harus >= 0. */
-  let estRaw = 0, estG9 = 0, estG10 = 0;
+  let estRaw = 0, estG9 = 0, estG10 = 0, estAtGrade = 0;
   const est = obj.estimates;
   if (est !== undefined && est !== null && est !== "") {
     if (typeof est !== "object" || Array.isArray(est)) {
@@ -2571,6 +2571,7 @@ function parseAutoDetectResult(rawObj) {
         estRaw = Math.round(Number(fields[0][1]) || 0);
         estG9 = Math.round(Number(fields[1][1]) || 0);
         estG10 = Math.round(Number(fields[2][1]) || 0);
+        estAtGrade = Math.round(Number(fields[3][1]) || 0);
       }
     }
   }
@@ -2588,7 +2589,7 @@ function parseAutoDetectResult(rawObj) {
     confidence: Math.round(conf),
     basis: "Identitas" + (hasPrice ? " & estimasi nilai" : "") + " dari Deteksi Otomatis publik (AI vision lewat Edge Function Supabase tera-grade)" + (hasPrice ? "" : " — estimasi harga tidak dikembalikan server, diisi manual dari harga pasar") + (notes ? " — catatan deteksi: " + notes : "") + ". Analisis kondisinya tetap diukur otomatis dari piksel foto di web ini.",
   };
-  const values = { raw: estRaw, g9: estG9, g10: estG10 };
+  const values = { raw: estRaw, g9: estG9, g10: estG10, atGrade: estAtGrade };
   return { errors: [], value: { detection: detection, values: values } };
 }
 function autoDetectFriendlyError(status, rawMsg) {
@@ -2689,13 +2690,24 @@ async function runAutoDetect() {
     renderTab();
   }
 }
+/* Nilai "di grade ini" untuk tampilan & simpanan: bila Deteksi Otomatis
+   mengembalikan atGrade dari server, angka server itu dipakai apa
+   adanya — estimates server adalah sumber kebenaran harga market dan
+   tidak ditimpa hitungan lokal. Interpolasi lama (valueAtGrade) hanya
+   fallback bila tidak ada atGrade server: isi manual, Mode Muse,
+   atau kartu contoh tanpa deteksi. */
+function displayValueAtGrade(overall, v) {
+  const at = v ? Number(v.atGrade) : 0;
+  if (Number.isFinite(at) && at > 0) return Math.round(at);
+  return valueAtGrade(overall, v.raw, v.g9, v.g10);
+}
 function buildSavePayload(d, a, v, f, b) {
   return {
     category: d.category, cardName: d.cardName, setName: d.setName, year: d.year,
     cardNumber: d.cardNumber, rarity: d.rarity, language: d.language, confidence: d.confidence,
     centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score,
     overall: a.overall, gradeLabel: gradeLabelFor(a.overall),
-    valueRaw: v.raw, valueAtGrade: valueAtGrade(a.overall, v.raw, v.g9, v.g10),
+    valueRaw: v.raw, valueAtGrade: displayValueAtGrade(a.overall, v),
     valueGrade9: v.g9, valueGrade10: v.g10,
     detail: {
       reasons: { centering: a.centering.reason, corners: a.corners.reason, edges: a.edges.reason, surface: a.surface.reason },
@@ -2741,21 +2753,24 @@ async function runAnalysis(isSample) {
   }
   const started = Date.now();
   let detection, vals;
-  if (isSample) {
-    detection = Object.assign({}, SAMPLE_DETECTION);
-    vals = Object.assign({}, SAMPLE_VALUES);
-  } else if (state.autoDet) {
+  if (state.autoDet) {
     /* Identitas + estimasi dari Deteksi Otomatis publik (Edge Function)
-       — analisis kondisinya tetap dari piksel foto. Bila estimates dari
-       server kosong/0, values tetap 0 agar user mengisi harga manual
-       di form hasil (tidak diisi 0 sebagai harga final). */
+       adalah SUMBER KEBENARAN untuk run ini — termasuk bila foto yang
+       dipakai adalah kartu contoh: confidence & harga server TIDAK
+       boleh ditimpa konstanta contoh. Analisis kondisinya tetap dari
+       piksel foto. Bila estimates dari server kosong/0, values tetap 0
+       agar user mengisi harga manual di form hasil (tidak diisi 0
+       sebagai harga final). */
     detection = Object.assign({}, state.autoDet);
-    vals = Object.assign({}, state.autoValues || { raw: 0, g9: 0, g10: 0 });
+    vals = Object.assign({}, state.autoValues || { raw: 0, g9: 0, g10: 0, atGrade: 0 });
   } else if (state.claudeDet) {
     /* Identitas + estimasi dari Mode Muse (JSON hasil analisis Muse
        yang ditempel user) — analisis kondisinya tetap dari piksel foto. */
     detection = Object.assign({}, state.claudeDet);
     vals = Object.assign({}, state.claudeValues);
+  } else if (isSample) {
+    detection = Object.assign({}, SAMPLE_DETECTION);
+    vals = Object.assign({}, SAMPLE_VALUES);
   } else {
     detection = { category: "Lainnya", cardName: "", setName: "", year: "", cardNumber: "", rarity: "", language: "Inggris", confidence: 0, basis: "" };
     vals = { raw: 0, g9: 0, g10: 0 };
@@ -2956,7 +2971,7 @@ function renderResultHtml() {
     '<div style="flex-shrink:0;border-left:1px solid rgba(236,229,207,0.2);padding-left:0.75rem;text-align:center"><p class="fd" style="font-size:52px;font-weight:900;line-height:1;color:' + gradeColor(a.overall) + ';margin:0">' + fmtScore(a.overall) + '</p>' +
     '<p class="fc" style="margin-top:0.25rem;font-size:11px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase">' + esc(gradeLabelFor(a.overall)) + "</p></div></div></div>" +
     (state.front ? '<div style="background:var(--surface2);padding:1rem"><img src="' + state.front.url + '" alt="Foto depan kartu di dalam slab hasil grading" style="margin:0 auto;width:100%;max-width:240px;border-radius:0.375rem;box-shadow:0 16px 32px rgba(0,0,0,0.55);display:block" /></div>' : "") +
-    '<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem;padding:0.75rem 1rem"><p style="font-size:14px;margin:0" class="dim">Estimasi nilai di grade ini: <span class="fd" style="font-size:18px;font-weight:900;color:var(--text)">' + (values.raw > 0 ? fmtIDR(valueAtGrade(a.overall, values.raw, values.g9, values.g10)) : "—") + '</span></p>' +
+    '<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem;padding:0.75rem 1rem"><p style="font-size:14px;margin:0" class="dim">Estimasi nilai di grade ini: <span class="fd" style="font-size:18px;font-weight:900;color:var(--text)">' + (values.raw > 0 ? fmtIDR(displayValueAtGrade(a.overall, values)) : "—") + '</span></p>' +
     '<p class="fc" style="font-size:10px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold-deep);margin:0">Grading Digital / Estimasi</p></div>' +
     '<p class="dim" style="border-top:1px solid var(--border);padding:0.625rem 1rem;font-size:12px;line-height:1.6;margin:0">Hasil grading digital dari analisis foto. Goresan sangat halus bisa tidak tertangkap kamera — foto yang tajam dan terang memberi hasil paling akurat.</p></div>';
   /* QR */
@@ -3027,7 +3042,7 @@ function renderResultHtml() {
       [["Raw / mentah", values.raw], ["Grade 9", values.g9], ["Grade 10", values.g10]].map((cell) =>
         '<div style="border-radius:0.5rem;background:var(--surface2);padding:0.625rem 0.5rem"><p style="font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;margin:0" class="dim">' + cell[0] + '</p><p class="fd" style="margin-top:0.125rem;font-size:14px;font-weight:900">' + fmtIDR(cell[1]) + "</p></div>"
       ).join("") + "</div>" +
-      '<p class="fd" style="margin-top:0.75rem;text-align:center;font-size:22px;font-weight:900">Di grade ' + a.overall.toFixed(1) + " kamu: " + fmtIDR(valueAtGrade(a.overall, values.raw, values.g9, values.g10)) + "</p>" +
+      '<p class="fd" style="margin-top:0.75rem;text-align:center;font-size:22px;font-weight:900">Di grade ' + a.overall.toFixed(1) + " kamu: " + fmtIDR(displayValueAtGrade(a.overall, values)) + "</p>" +
       (det.basis ? '<p class="dim" style="margin-top:0.25rem;text-align:center;font-size:12px">' + esc(det.basis) + "</p>" : "");
   } else {
     html += '<p class="dim" style="margin-top:0.25rem;font-size:14px">Estimasi nilai belum diisi untuk kartu ini — isi angka raw / grade 9 / grade 10 di kartu identitas di atas (dari harga pasar kartumu), lalu simpan koreksi.</p>';
@@ -3707,6 +3722,10 @@ function bindTabEvents(root) {
     el.addEventListener("input", () => {
       const v = Math.max(0, Math.round(Number(el.value) || 0));
       state.values[el.getAttribute("data-val")] = v;
+      /* User mengoreksi harga manual — atGrade dari server tidak lagi
+         jadi acuan; nilai "di grade ini" kembali ke hitungan dari
+         angka koreksi user. */
+      state.values.atGrade = 0;
       state.dirty = true;
       syncDirtyUi(root);
     });
