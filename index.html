@@ -2131,13 +2131,24 @@ function detectCardBoundary(p, opts) {
       }
     }
     pushCand([[w * 0.006, h * 0.006], [w * 0.994, h * 0.006], [w * 0.994, h * 0.994], [w * 0.006, h * 0.994]], "frame");
-    /* Varian pelengkap rasio untuk semua kandidat yang tingginya /
-       lebarnya kepotong garis internal — terutama kandidat persegi
-       panjang & masker di sisi depan. */
-    for (const c of raw.slice()) {
-      if (c.src === "ratio") continue;
-      for (const rv of ratioCompletionVariants(c.quad, w, h)) pushCand(rv, "ratio");
-      for (const gv of growFromCornerVariants(c.quad, w, h)) pushCand(gv, "grow");
+    /* Varian pelengkap rasio & tumbuh HANYA untuk sisi depan — obat
+       untuk kegagalan depan (sisi kepotong garis internal / sub-
+       persegi artwork). Di sisi belakang varian sintetis ini justru
+       merebut kemenangan dari segi empat kartu yang benar: varian
+       pelengkap bisa mendaratkan satu sisinya tepat di garis bingkai
+       dalam kartu belakang (bingkai emas), dan karena pita di dalam
+       garis itu bidang polos, skor pitanya lebih tinggi dari segi
+       empat kartu asli — warp lalu kehilangan border atas kartu dan
+       centering belakang terbaca ekstrem (kasus nyata kartu contoh:
+       belakang 41/59 · 82/18, grade jatuh 9.5 → 8.5). Sisi belakang
+       memang diniatkan tetap memakai pipa lama (lihat catatan PASS
+       DEPAN di kepala bagian ini), jadi varian tidak dibuat untuknya. */
+    if (side === "front") {
+      for (const c of raw.slice()) {
+        if (c.src === "ratio") continue;
+        for (const rv of ratioCompletionVariants(c.quad, w, h)) pushCand(rv, "ratio");
+        for (const gv of growFromCornerVariants(c.quad, w, h)) pushCand(gv, "grow");
+      }
     }
     if (!raw.length) return fail(10);
     /* Nilai tiap kandidat — versi mentah & versi sudut terhaluskan */
