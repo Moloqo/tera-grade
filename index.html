@@ -889,6 +889,19 @@ function findCardBounds(p) {
      6) KOREKSI MANUAL: pengguna bisa menggeser 4 titik sudut di
         pratinjau (atau menandai batas manual bila otomatis gagal) —
         sudut manual selalu menang atas hasil otomatis untuk analisis.
+     7) PASS DEPAN (v3): sisi depan full-art berborder perak tipis di
+        dalam sleeve/toploader punya dua jebakan yang tidak dimiliki
+        sisi belakang — garis internal artwork/strip info gradiennya
+        lebih kuat dari tepi kartu sebenarnya (satu sisi berhenti di
+        tengah badan kartu), dan tepi sleeve gradiennya lebih kuat
+        dari tepi kartu (segi empat memeluk sleeve). Karena itu
+        kandidat sisi depan dinilai dengan bobot khusus (putusan
+        tekstur & rasio TCG dinaikkan, kekuatan gradien diturunkan),
+        tiap kandidat yang rasionya kepotong mendapat varian
+        pelengkap rasio 63:88. Skor putus tekstur juga hanya
+        dipercaya bila terukur di ≥ 3 sisi, supaya segi empat pemeluk
+        bingkai foto tidak menang dari satu sisi semu. Sisi belakang
+        tetap memakai penilaian lama.
 
    Di bawah ambang, deteksi dinyatakan gagal secara jujur dan analisis
    jatuh kembali ke cara lama (seluruh foto) — tidak pernah menghalangi
@@ -1375,6 +1388,76 @@ function shiftQuadSides(mag, w, h, quad, dir) {
     return out;
   } catch (e) { return null; }
 }
+/* ---------- Varian pelengkap rasio TCG ----------
+   Kegagalan khas sisi depan: satu sisi segi empat berhenti di garis
+   internal yang kuat (garis strip info bawah, tepi jendela artwork,
+   garis pita nama) karena tepi kartu yang sebenarnya — border perak
+   tipis menempel sleeve bening — gradiennya lebih lemah. Segi empat
+   hasil potongan seperti itu tingginya kurang dari rasio TCG 63:88.
+   Untuk tiap kandidat yang rasionya meleset > 5%, buat varian dengan
+   SATU sisi diperpanjang sejajar sampai rasio pas (atas/bawah bila
+   terlalu pendek, kiri/kanan bila terlalu sempit) — varian itu
+   mendarat di tepi kartu yang sebenarnya dan penilaian penuh yang
+   memutuskan apakah dia memang lebih baik. */
+function ratioCompletionVariants(quad, w, h) {
+  try {
+    const sides = quadSideLens(quad);
+    const avgW = (sides.top + sides.bottom) / 2, avgH = (sides.left + sides.right) / 2;
+    if (avgW < 40 || avgH < 40) return [];
+    const target = 88 / 63;
+    const ratio = avgH / avgW;
+    if (Math.abs(ratio - target) / target < 0.05) return [];
+    const out = [];
+    const shiftSide = (e, dist) => {
+      const n = quadOutwardNormal(quad, e);
+      const q = quad.map((pt) => pt.slice());
+      for (const idx of [e, (e + 1) % 4]) { q[idx] = [q[idx][0] + n[0] * dist, q[idx][1] + n[1] * dist]; }
+      for (const pt of q) { pt[0] = Math.max(1, Math.min(w - 2, pt[0])); pt[1] = Math.max(1, Math.min(h - 2, pt[1])); }
+      return orderQuadCorners(q);
+    };
+    if (ratio < target) {
+      const dH = Math.min(avgW * target - avgH, avgH * 0.5);
+      if (dH > 6) { const vb = shiftSide(2, dH); if (vb) out.push(vb); const vt = shiftSide(0, dH); if (vt) out.push(vt); }
+    } else {
+      const dW = Math.min(avgH / target - avgW, avgW * 0.5);
+      if (dW > 6) { const vr = shiftSide(1, dW); if (vr) out.push(vr); const vl = shiftSide(3, dW); if (vl) out.push(vl); }
+    }
+    return out;
+  } catch (e) { return []; }
+}
+/* ---------- Varian tumbuh dari sudut jangkar ----------
+   Kegagalan depan lain: segi empat mengunci SUB-persegi badan kartu
+   — rasionya nyaris benar, tapi dua sisi yang bersebelahan berhenti
+   di garis internal dan dua sisi lain pas di tepi kartu (jangkarnya
+   satu sudut asli), biasanya karena dua tepi lain tertutup tangan
+   atau border glitter menyatu dengan latar. Varian ini menumbuhkan
+   kandidat dari tiap sudutnya sebagai jangkar (sudut jangkar diam,
+   sudut seberangnya menjauh 1,25×) — yang jangkarnya sudut kartu
+   asli mendarat di badan kartu penuh. Syaratnya ketat: hanya untuk
+   kandidat kecil (luas ≤ 45% foto) yang rasionya sudah dekat ke TCG,
+   supaya kandidat normal tidak ikut membesar. */
+function growFromCornerVariants(quad, w, h) {
+  try {
+    const sides = quadSideLens(quad);
+    const avgW = (sides.top + sides.bottom) / 2, avgH = (sides.left + sides.right) / 2;
+    if (avgW < 40 || avgH < 40) return [];
+    const areaFrac = quadAreaPx(quad) / (w * h);
+    if (areaFrac > 0.45) return [];
+    const target = 88 / 63;
+    if (Math.abs(avgH / avgW - target) / target > 0.12) return [];
+    const out = [];
+    for (let a = 0; a < 4; a++) {
+      const anchor = quad[a];
+      const q = quad.map((pt) => {
+        const gx = anchor[0] + (pt[0] - anchor[0]) * 1.25, gy = anchor[1] + (pt[1] - anchor[1]) * 1.25;
+        return [Math.max(1, Math.min(w - 2, gx)), Math.max(1, Math.min(h - 2, gy))];
+      });
+      const ordered = orderQuadCorners(q);
+      if (ordered) out.push(ordered);
+    }
+    return out;
+  } catch (e) { return []; }
+}
 /* ---------- Penyelamatan sisi (rescue) ----------
    Sisi kandidat dipindai dua arah (ke dalam & ke luar, sampai 22%
    panjang sisi) dan tiap posisi dinilai dari gabungan kekuatan garis
@@ -1567,12 +1650,18 @@ function textureBreakScore(p, mag, quad) {
       }
       if (cnt >= 10 && outOk >= 10) { rSum += (outM / outOk) / ((inM / cnt) + 25); rN++; }
     }
-    if (!rN) return 0.5;
+    /* Bukti putus tekstur hanya dipercaya bila terukur di minimal 3
+       sisi. Segi empat yang memeluk bingkai foto menyisakan 1–2 sisi
+       terukur (sisi lain sampel luarnya di luar foto) dan sisi yang
+       tersisa itu — mis. garis atas di depan dinding polos — memberi
+       skor putus semu yang tinggi, padahal tiga sisi lainnya bukan
+       tepi fisik sama sekali. */
+    if (rN < 3) return 0.5;
     const r = rSum / rN;
     return Math.max(0, Math.min(1, 1 - r));
   } catch (e) { return 0.5; }
 }
-function scoreQuadCandidate(p, keep, quad, maskCtx, compPts, mag) {
+function scoreQuadCandidate(p, keep, quad, maskCtx, compPts, mag, side) {
   const w = p.w, h = p.h;
   const areaFrac = quadAreaPx(quad) / (w * h);
   const sides = quadSideLens(quad);
@@ -1664,13 +1753,29 @@ function scoreQuadCandidate(p, keep, quad, maskCtx, compPts, mag) {
     maskScore = 0.6 * (tot ? inside / tot : 0) + 0.4 * compIn;
   }
   const texScore = textureBreakScore(p, mag, quad);
-  const parts = [
+  /* Sisi DEPAN dinilai dengan bobot berbeda — terukur dari foto-foto
+     depan asli (full-art perak di sleeve/toploader): gradien garis
+     internal artwork & strip info dan gradien tepi sleeve justru
+     LEBIH kuat daripada gradien tepi kartu yang bordernya tipis,
+     jadi edgeStrength menipu di sisi depan dan segi empat yang
+     memotong badan kartu (atau memeluk sleeve) bisa menang hanya
+     karena garisnya keras. Pembeda yang jujur di sisi depan adalah
+     putusnya tekstur tepat di tepi fisik (texScore) dan rasio TCG
+     (geoScore) — keduanya dinaikkan bobotnya, edgeStrength diturunkan.
+     Sisi belakang tidak diubah: border birunya tebal dan penilaian
+     lama sudah akurat di sana. */
+  const frontW = side === "front";
+  const parts = frontW ? [
+    { v: borderScore, wt: 0.24 }, { v: edgeStrength, wt: 0.05 }, { v: texScore, wt: 0.20 },
+    { v: contrastScore, wt: 0.08 }, { v: uniformityScore, wt: 0.04 },
+    { v: geoScore, wt: 0.17 }, { v: areaScore, wt: 0.05 },
+  ] : [
     { v: borderScore, wt: 0.24 }, { v: edgeStrength, wt: 0.12 }, { v: texScore, wt: 0.10 },
     { v: contrastScore, wt: 0.08 }, { v: uniformityScore, wt: 0.04 },
     { v: geoScore, wt: 0.12 }, { v: areaScore, wt: 0.06 },
   ];
-  if (edgeScore !== null) parts.push({ v: edgeScore, wt: 0.14 });
-  if (maskScore !== null) parts.push({ v: maskScore, wt: 0.10 });
+  if (edgeScore !== null) parts.push({ v: edgeScore, wt: frontW ? 0.10 : 0.14 });
+  if (maskScore !== null) parts.push({ v: maskScore, wt: frontW ? 0.07 : 0.10 });
   let wsum = 0, ssum = 0;
   for (const part of parts) { ssum += part.v * part.wt; wsum += part.wt; }
   let score = wsum > 0 ? ssum / wsum : 0;
@@ -2026,6 +2131,14 @@ function detectCardBoundary(p, opts) {
       }
     }
     pushCand([[w * 0.006, h * 0.006], [w * 0.994, h * 0.006], [w * 0.994, h * 0.994], [w * 0.006, h * 0.994]], "frame");
+    /* Varian pelengkap rasio untuk semua kandidat yang tingginya /
+       lebarnya kepotong garis internal — terutama kandidat persegi
+       panjang & masker di sisi depan. */
+    for (const c of raw.slice()) {
+      if (c.src === "ratio") continue;
+      for (const rv of ratioCompletionVariants(c.quad, w, h)) pushCand(rv, "ratio");
+      for (const gv of growFromCornerVariants(c.quad, w, h)) pushCand(gv, "grow");
+    }
     if (!raw.length) return fail(10);
     /* Nilai tiap kandidat — versi mentah & versi sudut terhaluskan */
     const peakThr = Math.max(55, weakThr + 10);
@@ -2046,7 +2159,7 @@ function detectCardBoundary(p, opts) {
       }
       let candBest = null;
       for (const q of variants) {
-        const sc = scoreQuadCandidate(p, keep, q, maskCtx, compPts, mag);
+        const sc = scoreQuadCandidate(p, keep, q, maskCtx, compPts, mag, side);
         if (!candBest || sc.score > candBest.sc.score) candBest = { quad: q, src: cand.src, sc: sc };
       }
       if (candBest) {
@@ -2080,6 +2193,13 @@ function detectCardBoundary(p, opts) {
           if ((bIn >= bOut + 0.18 && aC >= aB * 0.55 && cand.sc.score >= best.sc.score - 0.22) ||
               (bIn >= bOut + 0.08 && aC >= aB * 0.72 && cand.sc.score >= best.sc.score - 0.18)) { best = cand; switched = true; }
         } else if (aC >= aB * 1.05 && aC <= aB * 1.35 && quadContains(cand.quad, best.quad, 0.035)) {
+          /* Varian sintetis (pelengkap rasio / tumbuh) tidak boleh
+             merebut kemenangan lewat aturan luar-menang: mereka memang
+             dibuat lebih besar dari kandidat asalnya, jadi "memuat
+             pemenang + skor nyaris seri" selalu terpenuhi dan segi
+             empat yang sudah tepat malah digeser keluar badan kartu.
+             Mereka hanya boleh menang dari skor mentahnya sendiri. */
+          if (cand.src === "ratio" || cand.src === "grow") continue;
           if ((cand.sc.borderScore || 0) >= (best.sc.borderScore || 0) - 0.04 && cand.sc.score >= best.sc.score - 0.06) { best = cand; switched = true; }
         }
       }
