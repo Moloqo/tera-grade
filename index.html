@@ -4760,6 +4760,7 @@ function swapPhotoSides() {
   /* Identitas hasil Deteksi Otomatis membaca foto depan — setelah
      tukar, foto depannya berubah, jadi hasil deteksi lama gugur. */
   state.autoDet = null; state.autoValues = null; state.autoDetectError = "";
+  state.identityConfirmed = false; /* Quirk v25.1: tukar sisi = foto depan berubah — konfirmasi lama gugur bersama deteksi. */
   state.qualityConfirm = false;
   saveGradingDraft();
   renderTab();
@@ -4817,8 +4818,14 @@ async function pickPhoto(side, file) {
     else { state.back = photo; state.backQuality = quality; state.backDetect = dinfo; state.backClass = cls; }
     state.qualityConfirm = false;
     state.detectError = "";
-    /* Foto berubah — hasil deteksi otomatis sebelumnya tidak lagi berlaku untuk foto baru. */
-    state.autoDet = null; state.autoValues = null; state.autoDetectError = "";
+    /* Quirk v25.1: hanya foto DEPAN yang dibaca Deteksi Otomatis — ganti
+       foto depan = hasil deteksi gugur (termasuk konfirmasi identitas lama,
+       agar konfirmasi basi tidak membobol gate simpan). Ganti foto belakang
+       TIDAK menyentuh hasil deteksi: identitas tetap kebawa ke Analisis. */
+    if (target === "front") {
+      state.autoDet = null; state.autoValues = null; state.autoDetectError = "";
+      state.identityConfirmed = false;
+    }
     if (autoMoved) {
       toast("Foto ini terdeteksi sebagai sisi " + (target === "front" ? "depan" : "belakang") + " (keyakinan " + Math.round(cls.confidence * 100) + "%) — otomatis ditempatkan di slot " + (target === "front" ? "depan" : "belakang") + ". Bila keliru, pakai tombol Tukar depan/belakang.");
     } else if (slotBlocked) {
