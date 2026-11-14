@@ -4124,6 +4124,7 @@ function applyBrand() {
 function renderModeBanner() {
   const b = $("#modeBanner");
   const dot = $("#statusDot"), st = $("#statusText");
+  b.style.display = "";
   if (SB.enabled) {
     dot.classList.remove("demo");
     if (!state.rowsLoaded) {
@@ -4137,8 +4138,9 @@ function renderModeBanner() {
       b.innerHTML = "<strong>Arsip belum bisa dimuat:</strong> " + esc(state.rowsError) + ". Analisis tetap jalan di browser ini.";
     } else {
       st.textContent = "Supabase Terhubung";
-      b.classList.add("ok");
-      b.innerHTML = "<strong>Mode publik aktif — Supabase tera-grade terhubung.</strong> Riwayat, Pop Report, dan laporan QR tersimpan di project <strong>tera-grade</strong> (terpisah dari undangan-digital), jadi bisa dibuka dari perangkat mana pun. Owner mengelola data dari Supabase Dashboard — login pakai GitHub.";
+      b.classList.remove("ok");
+      b.innerHTML = "";
+      b.style.display = "none";
     }
   } else if (SB.urlOnly) {
     dot.classList.add("demo");
@@ -4542,10 +4544,33 @@ function renderLanding() {
   ];
   html += '<section aria-label="Perbandingan ' + esc(brand()) + ' dengan grading konvensional" style="margin-top:6rem">' +
     '<h3 data-aos="fade-up" data-aos-duration="1000" class="fd" style="text-align:center;font-size:clamp(1.8rem,4vw,2.75rem);font-weight:900;line-height:1.1;letter-spacing:-0.02em">' + esc(brand()) + ' vs Grading Konvensional</h3>' +
-    '<div data-aos="fade-up" data-aos-duration="1000" data-aos-delay="100" class="bandwrap mt4" style="border-color:#26262b;border-radius:1rem;overflow:hidden">' +
-    '<div class="bandrow" style="background:var(--surface2)"><span class="fc" style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase">Fitur</span><span class="row-wrap" style="gap:1.25rem"><span class="fc" style="font-size:11px;font-weight:700;letter-spacing:0.14em">' + esc(brand()) + '</span><span class="fc dim" style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase">Konvensional</span></span></div>' +
-    cmpRows.map((r, i) => '<div class="bandrow' + (i % 2 ? " alt" : "") + '"><span style="font-weight:600">' + r[0] + '</span><span class="row-wrap" style="gap:1.25rem"><span style="font-weight:800;min-width:3.2rem;text-align:right">' + r[1] + '</span><span class="dim" style="min-width:6.5rem;text-align:right">' + r[2] + "</span></span></div>").join("") +
-    "</div></section>";
+    '<div data-aos="fade-up" data-aos-duration="1000" data-aos-delay="100" class="bandwrap cmp-wrap mt4" style="border-color:#26262b;border-radius:1rem;overflow:hidden">' +
+    '<div class="cmp-head"><span class="fc">Fitur</span><span class="fc">' + esc(brand()) + '</span><span class="fc dim">Konvensional</span></div>' +
+    cmpRows.map((r, i) => '<div class="cmp-row' + (i % 2 ? " alt" : "") + '"><span class="cmp-feat">' + r[0] + '</span><span class="cmp-val cmp-teg"><span class="cmp-lab">' + esc(brand()) + '</span><span class="cmp-num">' + r[1] + '</span></span><span class="cmp-val cmp-konv"><span class="cmp-lab">Konvensional</span><span class="cmp-num dim">' + r[2] + "</span></span></div>").join("") +
+    "</div></section>" +
+    "<style>" +
+    ".cmp-head,.cmp-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,7rem) minmax(0,9.5rem);column-gap:1rem;align-items:center;padding:0.95rem 1rem}" +
+    ".cmp-head{background:var(--surface2);border-bottom:1px solid var(--border)}" +
+    ".cmp-head span{font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase}" +
+    ".cmp-head span:nth-child(2),.cmp-head span:nth-child(3){text-align:right}" +
+    ".cmp-row{font-size:14px}" +
+    ".cmp-row + .cmp-row{border-top:1px solid var(--border)}" +
+    ".cmp-row.alt{background:var(--surface2)}" +
+    ".cmp-feat{font-weight:600;line-height:1.45;min-width:0}" +
+    ".cmp-val{min-width:0}" +
+    ".cmp-lab{display:none}" +
+    ".cmp-num{display:block;text-align:right;line-height:1.45;overflow-wrap:break-word}" +
+    ".cmp-teg .cmp-num{font-weight:800}" +
+    "@media (max-width:640px){" +
+    ".cmp-head{display:none}" +
+    ".cmp-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:'feat feat' 'teg konv';row-gap:0.55rem;padding:1rem}" +
+    ".cmp-feat{grid-area:feat;font-size:14.5px}" +
+    ".cmp-teg{grid-area:teg}" +
+    ".cmp-konv{grid-area:konv;border-left:1px solid var(--border);padding-left:1rem}" +
+    ".cmp-lab{display:block;font-size:10px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#9b9ba0;margin-bottom:0.2rem}" +
+    ".cmp-num{text-align:left}" +
+    "}" +
+    "</style>";
   /* ── PITA STATISTIK angka raksasa (data nyata dari Supabase) ── */
   if (s.totalGradings > 0) {
     html += '<section aria-label="Statistik ' + esc(brand()) + '" style="margin-top:6rem;text-align:center">' +
