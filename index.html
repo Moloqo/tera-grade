@@ -717,7 +717,7 @@ const SUBGRADE_STANDARDS = [
     id: "centering", name: "Centering",
     short: "Keseimbangan lebar border kiri–kanan dan atas–bawah.",
     measured: "Rasio lebar border pada kedua sumbu (mis. 55/45), diukur dalam piksel dari foto.",
-    method: "Mesin menelusuri garis tengah kartu dari keempat sisi dan mencari transisi warna antara pita border luar dan wajah kartu dengan ambang adaptif dari kontras lokal garis itu (0,35× kontras, dibatasi 30–60); titik transisi diinterpolasi sub-piksel. Empat garis paralel (±8% dan ±16%) diukur juga untuk menilai kesepakatan — garis samping bisa memotong ornamen bingkai yang menjorok ke dalam, jadi lebar border diambil dari garis tengah, dan sebaran antar garis menjadi keyakinan ukur: sebaran besar — atau keyakinan deteksi batas kartu di bawah 80%, yang membuat geometri hasil lurusannya tidak pasti — membuat sisi itu berstatus Perkiraan. Skor mengikuti sumbu yang paling geser; kedua sisi (depan & belakang) dibandingkan — sisi yang lebih geser yang menentukan, kecuali sisi itu berstatus Perkiraan.",
+    method: "Mesin menelusuri lima garis paralel (garis tengah + ±8% dan ±16%) dari keempat sisi, mencari transisi warna antara pita border luar dan wajah kartu dengan ambang adaptif dari kontras lokal tiap garis (0,35× kontras, dibatasi 30–60); titik transisi diinterpolasi sub-piksel. Tiap garis divalidasi sebelum dipakai: crossing harus ditemukan (bukan fallback), langkah warnanya tajam dan menetap (median jarak warna 5 px sesudah crossing tetap di atas ambang, sampel sebelum crossing di bawah ambang, kenaikan tuntas dalam ≤ 2 px), dan lebarnya wajar (< 25% panjang garis). Lebar border per sisi diambil dari KLASTER lebar garis valid: garis-garis valid dikelompokkan, pisah klaster bila selisih > 4 px; garis tengah yang valid memakai dirinya bila sepakat dengan median klaster terdekat (selisih ≤ max 6 px atau 35% median), bila tidak memakai median klaster terdekat; garis tengah yang tidak valid memakai median klaster terdekat dari lebar tengahnya, bila tidak ada klaster dalam 12 px memakai klaster terkecil. Bila garis tengah dicurigai membaca pita interior (lebarnya jauh di atas garis lain), profilnya dipindai ulang dengan ambang rendah yang tetap menuntut langkah menetap. Sisi ditandai Perkiraan bila klaster terpilih berisi kurang dari 2 garis atau sebaran garis valid di atas 8 px. Keyakinan ukur dihitung dari sebaran garis valid saja, lalu dilipat dengan keyakinan deteksi batas kartu (quad) sebagai faktor kontinu — keyakinan gabungan di bawah 55%, border terukur sangat tipis (< 6 px), garis yang tidak sepakat, atau hasil lurusan yang terlalu kecil membuat sisi itu berstatus Perkiraan. Skor mengikuti sumbu yang paling geser; kedua sisi (depan & belakang) dibandingkan — sisi yang lebih geser yang menentukan, kecuali sisi itu berstatus Perkiraan.",
     checklist: [
       "Rasio kiri–kanan dan atas–bawah diukur terpisah, bukan dirata-rata",
       "Acuan 10 (Gem Mint): deviasi maksimal 2,5 poin dari 50/50",
@@ -772,7 +772,7 @@ const PHOTO_STANDARD = [
 ];
 const HOW_OVERALL = "Nilai akhir = rata-rata keempat subgrade (Centering, Corners, Edges, Surface), dibulatkan ke 0,5 terdekat. Tidak ada subgrade yang disembunyikan: setiap angka di hasil analisis disertai bukti ukurnya dan acuan pita nilai dari standar ini.";
 const GRADE_SCALE = [
-  ["10", "GEM MINT", "Nyaris sempurna di semua sisi: centering maks 55/45 di depan, sudut tajam, tanpa cacat permukaan yang terlihat."],
+  ["10", "GEM MINT", "Nyaris sempurna di semua sisi: centering maks 55/45, sudut tajam, tanpa cacat permukaan yang terlihat."],
   ["9.5", "MINT+", "Kemasan nyaris Gem Mint dengan satu kekurangan sangat kecil."],
   ["9", "MINT", "Satu kekurangan kecil: centering maks 60/40, whitening sangat tipis di satu sudut/titik tepi."],
   ["8", "NM-MT", "Near Mint–Mint: aus ringan terlihat saat diperiksa dekat, centering maks 65/35."],
@@ -2289,7 +2289,7 @@ function validQuadShape(quad, w, h, loose) {
   }
   return true;
 }
-function finishDetection(p, quad, confidence, source, side, wantWarp) {
+function finishDetection(p, quad, confidence, source, side, wantWarp, quadMeta) {
   const w = p.w, h = p.h;
   const sides = quadSideLens(quad);
   const avgW = (sides.top + sides.bottom) / 2, avgH = (sides.left + sides.right) / 2;
@@ -2307,7 +2307,7 @@ function finishDetection(p, quad, confidence, source, side, wantWarp) {
   if (!wr) return null;
   const zr = detectWarpedZones(wr.warped, orientation, side);
   const zones = zr.list;
-  const publicInfo = { detected: true, confidence: Math.round(confidence), corners: cornersFrac, orientation: orientation, zones: zones, source: source, layout: zr.layout };
+  const publicInfo = { detected: true, confidence: Math.round(confidence), corners: cornersFrac, orientation: orientation, zones: zones, source: source, layout: zr.layout, quadSource: quadMeta ? quadMeta.source : null, quadScore: quadMeta && quadMeta.score != null ? quadMeta.score : null, quadRefined: Boolean(quadMeta && quadMeta.refined) };
   return {
     detected: true, confidence: Math.round(confidence), corners: cornersFrac, orientation: orientation,
     zones: zones, publicInfo: publicInfo,
@@ -2321,7 +2321,7 @@ function detectCardBoundary(p, opts) {
   const fail = (confidence) => ({
     detected: false, confidence: Math.round(confidence || 0), corners: null,
     orientation: "portrait", zones: cardZones("portrait"),
-    publicInfo: { detected: false, confidence: Math.round(confidence || 0), corners: null, orientation: "portrait", zones: cardZones("portrait"), source: "otomatis" },
+    publicInfo: { detected: false, confidence: Math.round(confidence || 0), corners: null, orientation: "portrait", zones: cardZones("portrait"), source: "otomatis", quadSource: null, quadScore: null, quadRefined: false },
     warped: null, homography: null,
   });
   try {
@@ -2330,7 +2330,7 @@ function detectCardBoundary(p, opts) {
     if (opts.manual && Array.isArray(opts.manual) && opts.manual.length === 4) {
       const quadM = opts.manual.map((c) => [Number(c[0]) * (w - 1), Number(c[1]) * (h - 1)]);
       if (quadM.every((q) => isFinite(q[0]) && isFinite(q[1])) && validQuadShape(quadM, w, h, true)) {
-        const done = finishDetection(p, quadM, 100, "manual", side, wantWarp);
+        const done = finishDetection(p, quadM, 100, "manual", side, wantWarp, { source: "manual", score: null, refined: false });
         if (done) return done;
       }
     }
@@ -2471,7 +2471,7 @@ function detectCardBoundary(p, opts) {
       let candBest = null;
       for (const q of variants) {
         const sc = scoreQuadCandidate(p, keep, q, maskCtx, compPts, mag, side);
-        if (!candBest || sc.score > candBest.sc.score) candBest = { quad: q, src: cand.src, sc: sc };
+        if (!candBest || sc.score > candBest.sc.score) candBest = { quad: q, src: cand.src, sc: sc, refined: q !== cand.quad };
       }
       if (candBest) {
         bestPerCand.push(candBest);
@@ -2529,12 +2529,12 @@ function detectCardBoundary(p, opts) {
       const zonesFail = cardZones(orientation);
       return {
         detected: false, confidence: confidence, corners: cornersFrac, orientation: orientation, zones: zonesFail,
-        publicInfo: { detected: false, confidence: confidence, corners: cornersFrac, orientation: orientation, zones: zonesFail, source: "otomatis" },
+        publicInfo: { detected: false, confidence: confidence, corners: cornersFrac, orientation: orientation, zones: zonesFail, source: "otomatis", quadSource: best.src, quadScore: Math.round(best.sc.score * 1000) / 1000, quadRefined: Boolean(best.refined) },
         warped: null, homography: null,
       };
     }
     const srcLabel = best.src === "frame" ? "bingkai-penuh" : "otomatis";
-    const done = finishDetection(p, best.quad, confidence, srcLabel, side, wantWarp);
+    const done = finishDetection(p, best.quad, confidence, srcLabel, side, wantWarp, { source: best.src, score: Math.round(best.sc.score * 1000) / 1000, refined: Boolean(best.refined) });
     if (!done) return fail(confidence);
     return done;
   } catch (e) {
@@ -2569,7 +2569,12 @@ function measureCentering(p, b) {
      kontras border↔interior pada garis itu sendiri (bukan konstanta
      55 untuk semua kartu), dan titik transisinya diinterpolasi linear
      antar piksel (sub-piksel) — bukan piksel bulat pertama yang
-     melewati ambang. */
+     melewati ambang.
+     v23: profil jarak-d disimpan sekali, lalu dipakai ulang untuk
+     (a) aturan streak baru "≥2 dari 3 sampel berikutnya di atas
+     ambang", (b) info validasi garis (dPre, dPostMed, risePx), dan
+     (c) pindai ulang ambang rendah (thrLo) pada profil yang sama bila
+     garis tengah dicurigai membaca pita interior, bukan border. */
   const walkLine = (get, len) => {
     const s0 = Math.min(6, Math.max(2, Math.round(len * 0.012)));
     const refSamples = [];
@@ -2592,64 +2597,220 @@ function measureCentering(p, b) {
        berjarak 55–90 dari warna border, dan ambang 90 akan
        melewatinya lalu berhenti di elemen desain yang lebih dalam). */
     const thr = Math.min(60, Math.max(30, contrast * 0.35));
-    let prevT = s0, prevD = colorDist(get(s0), ref);
-    let streak = 0, crossT = -1, crossD = 0, crossPrevT = s0, crossPrevD = prevD;
-    for (let t = s0 + 1; t < len * 0.4; t++) {
-      const d = colorDist(get(t), ref);
-      if (d > thr) {
-        if (streak === 0) { crossT = t; crossD = d; crossPrevT = prevT; crossPrevD = prevD; }
-        streak++;
-        if (streak >= 2) {
-          const frac = Math.min(1, Math.max(0, (thr - crossPrevD) / Math.max(1, crossD - crossPrevD)));
-          return { w: crossPrevT + frac * (crossT - crossPrevT), fb: false };
+    /* Profil jarak-d garis ini (indeks = t). Dihitung sekali supaya
+       pindai ulang thrLo membaca profil yang persis sama. */
+    const tEnd = Math.min(len - 1, Math.ceil(len * 0.4) + 6);
+    const profD = [];
+    for (let t = 0; t <= tEnd; t++) profD.push(t >= s0 ? colorDist(get(t), ref) : 0);
+    const medRange = (arr, a, z) => { const s = []; for (let i = a; i <= z && i < arr.length; i++) s.push(arr[i]); return s.length ? medianOf(s) : 0; };
+    /* Cari crossing pada profil dengan ambang `th`.
+       mode "streak": sampel pertama di atas ambang yang dikonfirmasi
+       ≥2 dari 3 sampel berikutnya (termasuk dirinya) di atas ambang.
+       mode "sustain": sampel pertama di atas ambang yang menetap —
+       median d pada 5 px sesudahnya tetap di atas ambang. */
+    const scanCrossing = (th, mode) => {
+      for (let t = s0 + 1; t < len * 0.4; t++) {
+        if (!(profD[t] > th)) continue;
+        if (mode === "sustain") {
+          if (!(medRange(profD, t, t + 4) > th)) continue;
+        } else {
+          let over = 0;
+          for (let k = 0; k < 3; k++) if (profD[t + k] > th) over++;
+          if (over < 2) continue;
         }
-      } else streak = 0;
-      prevT = t; prevD = d;
-    }
-    return { w: len * 0.06, fb: true };
+        const crossD = profD[t], crossPrevT = t - 1, crossPrevD = profD[t - 1];
+        const frac = Math.min(1, Math.max(0, (th - crossPrevD) / Math.max(1, crossD - crossPrevD)));
+        /* Kenaikan: jarak dari sampel terakhir yang masih ≤ ½ ambang
+           sampai crossing — langkah tepi asli meloncat dalam 1–2 px,
+           tanjakan desain interior merangkak jauh lebih lama. */
+        let lastHalf = s0;
+        for (let j = t - 1; j >= s0; j--) { if (profD[j] <= th * 0.5) { lastHalf = j; break; } if (j === s0) lastHalf = s0; }
+        return {
+          w: crossPrevT + frac * (t - crossPrevT), fb: false,
+          crossT: t, dPre: crossPrevD, dPostMed: medRange(profD, t, t + 4),
+          risePx: t - lastHalf, thrUsed: th,
+        };
+      }
+      return null;
+    };
+    const buildResult = (scan, thrUsed, loUsed) => scan ? {
+      w: scan.w, fb: false, crossT: scan.crossT, dPre: scan.dPre, dPostMed: scan.dPostMed,
+      risePx: scan.risePx, thr: thrUsed, ref: ref, loUsed: loUsed,
+    } : {
+      w: len * 0.06, fb: true, crossT: -1, dPre: null, dPostMed: null,
+      risePx: null, thr: thrUsed, ref: ref, loUsed: loUsed,
+    };
+    const hi = scanCrossing(thr, "streak");
+    const base = buildResult(hi, thr, false);
+    /* Pindai ulang ambang rendah pada profil yang sama. Hanya dipanggil
+       measureCentering untuk GARIS TENGAH yang dicurigai (lihat
+       rescanCenterIfSuspect) — tidak pernah untuk garis yang sudah
+       sepakat. Lantai 18, langit 30: cukup rendah untuk menangkap
+       langkah lokal tepi border yang menyatu dengan art, tanpa
+       membuka pintu ke noise interior. */
+    base.rescanLo = () => {
+      const thrLo = Math.min(30, Math.max(18, thr * 0.5));
+      const lo = scanCrossing(thrLo, "sustain");
+      if (!lo) return null;
+      if (!base.fb && lo.crossT >= base.crossT) return null;
+      return buildResult(lo, thrLo, true);
+    };
+    return base;
   };
-  /* Ukur di 5 garis paralel (tengah ±8% ±16%). Lebar border diambil
-     dari GARIS TENGAH — garis ukur kanonik centering — karena garis
-     samping bisa memotong ornamen/teks bingkai yang menjorok ke dalam
-     dan membaca "border" jauh lebih tebal dari bingkai cetaknya
-     (terbukti pada kartu contoh berhias: median 5 garis membaca
-     atas 68/32 padahal bingkainya seimbang). Keempat garis paralel
-     dipakai untuk menilai KESEPAKATAN: sebarannya menjadi keyakinan
-     ukur (sebaran besar = border menyatu dengan interior / ornamen /
-     foto miring → status "Perkiraan"). Bila garis tengah sendiri
-     gagal menemukan transisi, median garis yang berhasil dipakai. */
+  /* Garis VALID (per sisi, per garis) — keempat syarat harus lolos:
+     (1) crossing ditemukan sebelum 0,4×len (bukan fallback);
+     (2) langkah tajam & menetap: median d 5 px sesudah crossing di
+         atas ambang, d 1 px sebelum crossing di bawah ambang, dan
+         kenaikan dari ≤½ ambang ke crossing terjadi dalam ≤2 px;
+     (3) posisi wajar: w < 0,25×len;
+     (4) bukan fallback (fb) — sama dengan (1), ditegaskan terpisah
+         karena lebar fallback 0,06×len tidak boleh ikut median. */
+  const lineValid = (r, len) => {
+    if (!r || r.fb) return false;
+    if (!(r.w < len * 0.25)) return false;
+    if (!(r.dPostMed > r.thr && r.dPre < r.thr && r.risePx <= 2)) return false;
+    return true;
+  };
+  /* Pindai ulang thrLo untuk garis tengah satu sisi, HANYA bila
+     dicurigai: (i) lebarnya > 0,12×len, atau (ii) lebarnya jauh di
+     atas median garis lain sisi itu. Bila garis tengah valid dan
+     sudah sepakat dengan median garis valid lain, thrLo TIDAK
+     diterapkan — garis yang sepakat tidak diutak-atik. */
+  const rescanCenterIfSuspect = (res, len) => {
+    const c = res[2];
+    if (!c || c.fb || typeof c.rescanLo !== "function") return res;
+    const others = res.filter((r, i) => i !== 2);
+    const validOthersW = others.filter((r) => lineValid(r, len)).map((r) => r.w);
+    if (validOthersW.length && lineValid(c, len)) {
+      const mv = medianOf(validOthersW);
+      if (Math.abs(c.w - mv) <= Math.max(6, 0.35 * mv)) return res;
+    }
+    const othersW = others.filter((r) => !r.fb).map((r) => r.w);
+    const medOthers = othersW.length ? medianOf(othersW) : null;
+    const condI = c.w > 0.12 * len;
+    const condII = medOthers !== null && c.w > medOthers + Math.max(6, 0.35 * medOthers);
+    if (!condI && !condII) return res;
+    const lo = c.rescanLo();
+    if (!lo) return res;
+    const out = res.slice();
+    out[2] = lo;
+    return out;
+  };
+  /* Pemilihan lebar per sisi — v23.1: berbasis KLASTER lebar garis
+     valid, BUKAN median global. Median global lintas klaster terbukti
+     jadi bug: pada sisi bimodal (sebagian garis membaca tepi kartu
+     asli, sebagian membaca tepi toploader / pita interior), median
+     global mengadopsi klaster yang salah dan membuang lebar benar di
+     dekat garis tengah (kasus nyata: garis tengah 9,8px yang benar
+     kalah oleh median global 44,5px dari tepi toploader). Aturannya:
+     - klasterkan lebar valid terurut; pisah klaster bila gap antar
+       lebar berurutan > 4px;
+     - 0 garis valid → garis tengah + Perkiraan (tidak berubah);
+     - 1 garis valid → pakai garis itu, paksa Perkiraan (bukti satu
+       garis tipis) — garis valid tunggal mengalahkan garis tengah
+       yang INVALID;
+     - 2+ garis valid → aturan klaster di bawah; Perkiraan TIDAK
+       dipaksa hanya karena jumlah garis (rumus keyakinan yang
+       memutuskan), kecuali syarat klaster di butir terakhir;
+     - garis tengah VALID → ambil klaster yang mediannya paling dekat
+       dengan lebar tengah; bila |tengah − medianKlaster| ≤ max(6px,
+       0,35×medianKlaster) pakai garis tengah, selain itu pakai median
+       klaster terdekat itu (BUKAN median global);
+     - garis tengah INVALID → pakai median klaster paling dekat
+       dengan lebar tengah (lebar tengah tetap bukti posisi meski
+       langkahnya gagal validasi); bila tak ada klaster dalam 12px
+       dari lebar tengah → median klaster lebar terkecil;
+     - satu klaster saja → median klaster itu (atau garis tengah bila
+       valid & sepakat, lewat aturan garis tengah valid di atas);
+     - sisi ditandai Perkiraan bila klaster terpilih berisi < 2 garis
+       ATAU sebaran semua garis valid > 8px (bimodal — angka bisa
+       dipakai tapi tidak pasti).
+     DILARANG: median global lintas klaster; min() lintas garis. */
+  const pickSide = (res, len) => {
+    const center = res[2];
+    const validW = res.filter((r) => lineValid(r, len)).map((r) => r.w);
+    if (!validW.length) {
+      return { width: center ? center.w : len * 0.06, estimated: true, via: "center-only" };
+    }
+    if (validW.length === 1) {
+      return { width: validW[0], estimated: true, via: "single-valid" };
+    }
+    const sorted = validW.slice().sort((a, b) => a - b);
+    const clusters = [[sorted[0]]];
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] - sorted[i - 1] > 4) clusters.push([sorted[i]]);
+      else clusters[clusters.length - 1].push(sorted[i]);
+    }
+    const cInfo = clusters.map((c) => ({ members: c, med: medianOf(c) }));
+    const totalSpread = sorted[sorted.length - 1] - sorted[0];
+    const estFromCluster = (ci) => ci.members.length < 2 || totalSpread > 8;
+    const cw = center ? center.w : null;
+    let chosen = null;
+    if (cw !== null) {
+      let bestD = Infinity;
+      cInfo.forEach((ci) => { const d = Math.abs(ci.med - cw); if (d < bestD) { bestD = d; chosen = ci; } });
+    }
+    if (center && lineValid(center, len) && chosen) {
+      if (Math.abs(cw - chosen.med) <= Math.max(6, 0.35 * chosen.med)) {
+        return { width: cw, estimated: estFromCluster(chosen), via: "center" };
+      }
+      return { width: chosen.med, estimated: estFromCluster(chosen), via: "cluster" };
+    }
+    /* Garis tengah invalid: klaster terdekat dari lebar tengah; bila
+       tak ada klaster dalam 12px → klaster lebar terkecil. */
+    if (!chosen || Math.abs(chosen.med - cw) > 12) {
+      chosen = cInfo.reduce((a, b) => (b.med < a.med ? b : a), cInfo[0]);
+    }
+    return { width: chosen.med, estimated: estFromCluster(chosen), via: "cluster" };
+  };
+  /* Ukur di 5 garis paralel (tengah ±8% ±16%) per sisi. */
   const offs = [-0.16, -0.08, 0, 0.08, 0.16];
   const clampY = (y) => Math.min(b.y1 - 2, Math.max(b.y0 + 2, y));
   const clampX = (x) => Math.min(b.x1 - 2, Math.max(b.x0 + 2, x));
   const midY = (b.y0 + b.y1) / 2, midX = (b.x0 + b.x1) / 2;
-  const leftsR = offs.map((o) => walkLine((t) => rowColor(p, clampY(Math.round(midY + o * cardH)), b.x0 + t), cardW));
-  const rightsR = offs.map((o) => walkLine((t) => rowColor(p, clampY(Math.round(midY + o * cardH)), b.x1 - t), cardW));
-  const topsR = offs.map((o) => walkLine((t) => colColor(p, clampX(Math.round(midX + o * cardW)), b.y0 + t), cardH));
-  const bottomsR = offs.map((o) => walkLine((t) => colColor(p, clampX(Math.round(midX + o * cardW)), b.y1 - t), cardH));
-  const pickWidth = (res) => {
-    const center = res[2];
-    if (center && !center.fb) return center.w;
-    const ok = res.filter((r) => !r.fb).map((r) => r.w);
-    if (ok.length) return medianOf(ok);
-    return medianOf(res.map((r) => r.w));
-  };
-  const lefts = leftsR.map((r) => r.w), rights = rightsR.map((r) => r.w);
-  const tops = topsR.map((r) => r.w), bottoms = bottomsR.map((r) => r.w);
-  const left = pickWidth(leftsR), right = pickWidth(rightsR), top = pickWidth(topsR), bottom = pickWidth(bottomsR);
+  const leftsR = rescanCenterIfSuspect(offs.map((o) => walkLine((t) => rowColor(p, clampY(Math.round(midY + o * cardH)), b.x0 + t), cardW)), cardW);
+  const rightsR = rescanCenterIfSuspect(offs.map((o) => walkLine((t) => rowColor(p, clampY(Math.round(midY + o * cardH)), b.x1 - t), cardW)), cardW);
+  const topsR = rescanCenterIfSuspect(offs.map((o) => walkLine((t) => colColor(p, clampX(Math.round(midX + o * cardW)), b.y0 + t), cardH)), cardH);
+  const bottomsR = rescanCenterIfSuspect(offs.map((o) => walkLine((t) => colColor(p, clampX(Math.round(midX + o * cardW)), b.y1 - t), cardH)), cardH);
+  const pickL = pickSide(leftsR, cardW), pickR = pickSide(rightsR, cardW);
+  const pickT = pickSide(topsR, cardH), pickB = pickSide(bottomsR, cardH);
+  const left = pickL.width, right = pickR.width, top = pickT.width, bottom = pickB.width;
+  /* Sebaran per sumbu dihitung dari garis VALID saja — garis buangan
+     tidak boleh menggelembungkan ketidakpastian. Bila garis valid
+     pada satu sisi < 2, sebaran sisi itu jatuh ke sebaran lama
+     (semua garis, konservatif). */
   const spreadOf = (arr) => Math.max.apply(null, arr) - Math.min.apply(null, arr);
-  const lrSpread = Math.max(spreadOf(lefts), spreadOf(rights));
-  const tbSpread = Math.max(spreadOf(tops), spreadOf(bottoms));
+  const spreadSide = (res, len) => {
+    const v = res.filter((r) => lineValid(r, len)).map((r) => r.w);
+    return v.length >= 2 ? spreadOf(v) : spreadOf(res.map((r) => r.w));
+  };
+  const lrSpread = Math.max(spreadSide(leftsR, cardW), spreadSide(rightsR, cardW));
+  const tbSpread = Math.max(spreadSide(topsR, cardH), spreadSide(bottomsR, cardH));
+  /* Kalibrasi keyakinan dari kesepakatan garis valid. Keyakinan quad
+     dilipat di analyzeSide (confidence = min(spreadConf, quadFactor))
+     — bukan lagi gerbang biner yang memaksa Perkiraan. */
   const lrConf = Math.min(1, Math.max(0.05, 1 - lrSpread / Math.max(8, cardW * 0.06)));
   const tbConf = Math.min(1, Math.max(0.05, 1 - tbSpread / Math.max(8, cardH * 0.06)));
-  const confidence = Math.min(lrConf, tbConf);
+  const spreadConf = Math.min(lrConf, tbConf);
+  const confidence = spreadConf;
   const r1 = (v) => Math.round(v * 10) / 10;
+  const lineEv = (res, len) => res.map((r) => ({ w: r1(r.w), fb: Boolean(r.fb), valid: lineValid(r, len), thr: Math.round(r.thr) }));
+  const pickEstimated = { L: pickL.estimated, R: pickR.estimated, T: pickT.estimated, B: pickB.estimated };
+  const estimated = confidence < 0.55
+    || Math.min(left, right, top, bottom) < 6
+    || (cardW + 1) < 300
+    || pickL.estimated || pickR.estimated || pickT.estimated || pickB.estimated;
   return {
     lrPct: Math.round((left / Math.max(1, left + right)) * 100),
     tbPct: Math.round((top / Math.max(1, top + bottom)) * 100),
     leftPx: r1(left), rightPx: r1(right), topPx: r1(top), bottomPx: r1(bottom),
     confidence: Math.round(confidence * 100) / 100,
-    estimated: confidence < 0.55,
+    spreadConf: Math.round(spreadConf * 100) / 100,
+    estimated: estimated,
     lrSpreadPx: r1(lrSpread), tbSpreadPx: r1(tbSpread),
+    lines: { L: lineEv(leftsR, cardW), R: lineEv(rightsR, cardW), T: lineEv(topsR, cardH), B: lineEv(bottomsR, cardH) },
+    thr: { L: Math.round(leftsR[2].thr), R: Math.round(rightsR[2].thr), T: Math.round(topsR[2].thr), B: Math.round(bottomsR[2].thr) },
+    pickEstimated: pickEstimated,
   };
 }
 /* Konteks ukur satu sisi: (1) MASKER BENTUK KARTU — di ruang warp,
@@ -2835,14 +2996,22 @@ function analyzeSide(img, side) {
   const sevFor = (bandScore) => (bandScore >= 9 ? "ringan" : bandScore >= 7 ? "sedang" : "berat");
   /* Centering */
   const cm = measureCentering(p, b);
-  /* Keyakinan batas kartu yang rendah berarti geometri hasil lurusan
-     (warp) sendiri tidak pasti beberapa persen — centering yang
-     dibaca darinya berstatus Perkiraan, apa pun sebaran garis
-     ukurnya. Kasus nyata: sisi belakang kartu contoh terdeteksi 70%
-     dan warp-nya menggeser rasio ukur dari geometri foto aslinya,
-     sementara sisi depan (85%) terbaca konsisten dengan fotonya. */
+  /* Keyakinan quad (deteksi batas kartu) DILIPAT ke keyakinan ukur
+     sebagai faktor kontinu — confidence = min(keyakinan sebaran garis
+     valid, keyakinan quad) — bukan lagi gerbang biner "quad < 80% →
+     Perkiraan" yang dulu membuat hampir semua foto berstatus
+     Perkiraan dan penggabungan dua sisi hampir selalu jatuh ke skor
+     minimum. Status Perkiraan kini murni dari rumus kalibrasi di
+     measureCentering (confidence gabungan < 0,55, border terukur
+     sangat tipis, atau hasil lurusan terlalu kecil). */
   const quadConf = detInfo && detInfo.detected && detInfo.warped ? (boundsInfo.confidence || 0) : null;
-  if (quadConf !== null && quadConf < 80) cm.estimated = true;
+  const spreadConf = cm.spreadConf != null ? cm.spreadConf : cm.confidence;
+  cm.spreadConf = spreadConf;
+  cm.quadConf = quadConf;
+  if (quadConf !== null) {
+    cm.confidence = Math.round(Math.min(spreadConf, quadConf / 100) * 100) / 100;
+    cm.estimated = Boolean(cm.estimated) || cm.confidence < 0.55;
+  }
   const lrPct = cm.lrPct, tbPct = cm.tbPct;
   const lrDev = Math.abs(lrPct - 50), tbDev = Math.abs(tbPct - 50);
   const worstDev = Math.max(lrDev, tbDev);
@@ -2863,10 +3032,22 @@ function analyzeSide(img, side) {
     });
   }
   if (cm.estimated) {
+    const pickNames = { L: "kiri", R: "kanan", T: "atas", B: "bawah" };
+    const disagreeSides = cm.pickEstimated ? Object.keys(cm.pickEstimated).filter((k) => cm.pickEstimated[k]).map((k) => pickNames[k]) : [];
+    const minBorderPx = Math.min(cm.leftPx, cm.rightPx, cm.topPx, cm.bottomPx);
+    const dLR = cm.leftPx - cm.rightPx, dTB = cm.topPx - cm.bottomPx;
+    const diagHint = dLR * dTB < 0 && Math.abs(dLR) >= 2 && Math.abs(Math.abs(dLR) - Math.abs(dTB)) <= 3
+      ? " Pola gesernya diagonal — selisih kiri–kanan dan atas–bawah berlawanan arah dengan besar yang mirip (" + Math.abs(Math.round(dLR * 10) / 10) + "px vs " + Math.abs(Math.round(dTB * 10) / 10) + "px), pola khas sudut hasil lurusan yang sedikit meleset: coba koreksi 4 sudut manual ke tepi kartu sebenarnya, lalu analisis ulang."
+      : "";
     findings.push({
       area: "Centering sisi " + sideLabel + " (Perkiraan)",
-      metric: "Rasio kiri–kanan " + lrText + " dan atas–bawah " + tbText + " berstatus PERKIRAAN: kelima garis ukur paralel tidak sepakat (sebaran kiri–kanan " + cm.lrSpreadPx + "px, atas–bawah " + cm.tbSpreadPx + "px; keyakinan ukur " + Math.round((cm.confidence || 0) * 100) + "%)" + (quadConf !== null && quadConf < 80 ? "; keyakinan deteksi batas kartu sisi ini hanya " + quadConf + "% sehingga geometri hasil lurusannya tidak pasti" : "") + ". Penyebab lazim: warna border menyatu dengan interior, geometri batas kartu kurang pasti, atau foto agak miring.",
-      standard: "Centering diukur pada garis tengah dengan interpolasi sub-piksel dan ambang adaptif, divalidasi 4 garis paralel di sekitarnya; bila sebaran antar garis besar, hasil ditandai Perkiraan dan penggabungan dua sisi mengutamakan sisi yang terukur pasti.",
+      metric: "Rasio kiri–kanan " + lrText + " dan atas–bawah " + tbText + " berstatus PERKIRAAN. Sumber ketidakpastiannya dipecah: sebaran garis valid kiri–kanan " + cm.lrSpreadPx + "px dan atas–bawah " + cm.tbSpreadPx + "px menghasilkan keyakinan sebaran " + Math.round(spreadConf * 100) + "%; keyakinan quad (deteksi batas kartu) sisi ini " + (quadConf !== null ? quadConf + "%" : "tidak tersedia — kartu tidak terdeteksi, analisis memakai seluruh foto") + "; keyakinan gabungan " + Math.round((cm.confidence || 0) * 100) + "%."
+        + (disagreeSides.length ? " Pemilihan lebar sisi " + disagreeSides.join(", ") + " jatuh ke garis tengah karena garis-garis ukurnya tidak sepakat." : "")
+        + (minBorderPx < 6 ? " Border terukur sangat tipis di satu sisi (" + minBorderPx + "px) sehingga rasio mudah bergeser oleh kesalahan sub-piksel." : "")
+        + (mapBack && (W + 1) < 300 ? " Hasil lurusan kartu sisi ini kecil (" + (W + 1) + "px) sehingga resolusi ukur terbatas." : "")
+        + diagHint
+        + " Penyebab lazim: warna border menyatu dengan interior, geometri batas kartu kurang pasti, atau foto agak miring.",
+      standard: "Centering diukur dari klaster lebar garis valid: lima garis paralel per sisi, tiap garis divalidasi (crossing ditemukan, langkah warna tajam & menetap, posisi wajar); lebar per sisi diambil dari median klaster terdekat, garis tengah menjadi jangkar bila valid dan sepakat dengan median klaster itu. Keyakinan ukur adalah gabungan keyakinan sebaran garis valid dan keyakinan quad; di bawah 55% sisi ditandai Perkiraan dan penggabungan dua sisi mengutamakan sisi yang terukur pasti.",
       impact: "Centering sisi " + sideLabel + " ditandai Perkiraan — sisi ini tidak menghukum sendirian saat digabung dengan sisi lain.",
       severity: "ringan", side: side, kind: "centering", estimated: true,
       x: (b.x0 + W / 2) / p.w, y: (b.y0 + H / 2) / p.h,
@@ -3070,7 +3251,7 @@ function analyzeSide(img, side) {
     });
   });
   const evidence = {
-    centering: { leftPx: cm.leftPx, rightPx: cm.rightPx, topPx: cm.topPx, bottomPx: cm.bottomPx, confidence: cm.confidence, estimated: cm.estimated },
+    centering: { leftPx: cm.leftPx, rightPx: cm.rightPx, topPx: cm.topPx, bottomPx: cm.bottomPx, confidence: cm.confidence, estimated: cm.estimated, spreadConf: cm.spreadConf, quadConf: cm.quadConf, lrSpreadPx: cm.lrSpreadPx, tbSpreadPx: cm.tbSpreadPx, thr: cm.thr, pickEstimated: cm.pickEstimated, lines: cm.lines },
     corners: cornerStats.map((s, i) => ({ name: CORNER_NAMES[i], wornPct: Math.round(s.ratio * 100), validPct: Math.round(s.validFrac * 100), estimated: s.estimated })),
     edges: edgeStats.map((s, i) => ({ name: (edgeRects[i] || edgeRects[0]).name, wornPct: Math.round(s.ratio * 100), validPct: Math.round(s.validFrac * 100), estimated: s.estimated })),
     surface: { badCells: badCells, totalCells: grid * grid, worstEnergy: Math.round(worstCell.energy), zones: surfaceZones, threshold: Math.round(surfThr), holo: holo },
@@ -3123,20 +3304,33 @@ function combineAnalysis(front, back) {
   if (extreme(back.centering) && !extreme(front.centering)) {
     centering = Object.assign({}, front.centering, { reason: "Depan " + front.centering.lrText + " · " + front.centering.tbText + ". Pembacaan belakang tidak konklusif (desain full-bleed), jadi centering mengikuti sisi depan." });
   } else if (extreme(front.centering) && !extreme(back.centering)) {
-    centering = Object.assign({}, back.centering, { lrText: front.centering.lrText, tbText: front.centering.tbText, reason: "Belakang " + back.centering.lrText + " · " + back.centering.tbText + ". Pembacaan depan tidak konklusif, jadi centering mengikuti sisi belakang." });
+    centering = Object.assign({}, back.centering, { reason: "Belakang " + back.centering.lrText + " · " + back.centering.tbText + ". Pembacaan depan tidak konklusif, jadi centering mengikuti sisi belakang." });
   } else {
     const cFront = front.centering.score, cBack = back.centering.score;
-    const fEst = Boolean(front.centering.estimated), bEst = Boolean(back.centering.estimated);
+    /* v23.1 — gabungan sadar quad (perilaku gabungan v22, TANPA
+       gerbang biner per-sisi di analyzeSide): satu sisi dianggap
+       "tidak pasti untuk digabung" bila flag Perkiraan-nya true ATAU
+       keyakinan quad (deteksi batas kartu) sisi itu < 80. Tepat satu
+       sisi tidak pasti → centering mengikuti sisi satunya seutuhnya;
+       keduanya tidak pasti → skor minimum, seperti sebelumnya. */
+    const quadOf = (sideObj) => {
+      if (sideObj.centering && sideObj.centering.quadConf != null) return sideObj.centering.quadConf;
+      const ev = sideObj.evidence && sideObj.evidence.centering;
+      return ev && ev.quadConf != null ? ev.quadConf : null;
+    };
+    const fQuad = quadOf(front), bQuad = quadOf(back);
+    const fEst = Boolean(front.centering.estimated) || (fQuad !== null && fQuad < 80);
+    const bEst = Boolean(back.centering.estimated) || (bQuad !== null && bQuad < 80);
     let cScore, cNote;
     if (fEst && !bEst) {
       cScore = cBack;
-      cNote = "Sisi depan berstatus Perkiraan, jadi centering mengikuti sisi belakang yang terukur pasti.";
+      cNote = "Sisi depan tidak pasti untuk digabung (berstatus Perkiraan dan/atau keyakinan quad di bawah 80%), jadi centering mengikuti sisi belakang yang terukur pasti.";
     } else if (bEst && !fEst) {
       cScore = cFront;
-      cNote = "Sisi belakang berstatus Perkiraan, jadi centering mengikuti sisi depan yang terukur pasti.";
+      cNote = "Sisi belakang tidak pasti untuk digabung (berstatus Perkiraan dan/atau keyakinan quad di bawah 80%), jadi centering mengikuti sisi depan yang terukur pasti.";
     } else if (fEst && bEst) {
       cScore = Math.min(cFront, cBack);
-      cNote = "Kedua sisi berstatus Perkiraan — skor mengikuti sisi yang lebih geser dari keduanya; foto ulang yang tegak lurus memberi angka lebih pasti.";
+      cNote = "Kedua sisi tidak pasti untuk digabung (berstatus Perkiraan dan/atau keyakinan quad di bawah 80%) — skor mengikuti sisi yang lebih geser dari keduanya; foto ulang yang tegak lurus memberi angka lebih pasti.";
     } else {
       cScore = Math.min(cFront, cBack);
       cNote = "Skor mengikuti sisi yang lebih geser (sisi terburuk menentukan, tanpa bonus rata-rata).";
