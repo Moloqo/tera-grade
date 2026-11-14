@@ -4014,6 +4014,7 @@ const state = {
   savedId: null,
   /* K2: draf lokal hasil analisis — persist hanya lewat confirmAndSaveDraft. */
   draftPayload: null,
+  saveBlockedReason: "",
   photoFailed: false,
   savedFrontUrl: null,
   savedBackUrl: null,
@@ -5156,20 +5157,40 @@ function refreshIdentityBadges(root) {
   const badge = root.querySelector("[data-auto-needs-badge]") || root.querySelector("[data-result-needs-badge]");
   if (badge) badge.style.display = det.needsConfirm ? "" : "none";
 }
+function atGradeNoteText() {
+  const v = state.values;
+  if (v && Number(v.recalcAtGrade) > 0) {
+    if (Number(v.atGrade) > 0) return "Angka server: " + fmtIDR(v.atGrade) + ". Hitung ulang dari angka di atas: " + fmtIDR(v.recalcAtGrade) + " — angka server mungkin sudah tidak cocok dengan identitas baru (nama diubah setelah deteksi). Untuk harga server yang baru, pakai “Deteksi ulang harga”.";
+    return "Hitung ulang dari angka di atas: " + fmtIDR(v.recalcAtGrade) + ".";
+  }
+  if (state.priceStale) return "⚠ Harga di atas sudah kamu ubah — angka “Di grade ini” dari server mungkin sudah tidak cocok. Tekan Hitung ulang untuk memakai angka barumu.";
+  return (v && v.atGrade > 0) ? "Angka “Di grade ini” memakai estimasi server." : "";
+}
 /* Hitung ulang slab "Di grade ini" secara live saat harga diedit (R9).
-   Bila harga basi (priceStale), atGrade server diabaikan sementara dan
-   slab memakai interpolasi dari angka yang terlihat — sama dengan angka
-   yang disimpan buildSavePayload. */
+   Fix defect 2: header/slab TIDAK LAGI memakai interpolasi lokal sebagai
+   angka utama saat harga basi — angka server tetap tampil; interpolasi
+   hanya muncul sebagai pembanding berlabel (recalcAtGrade) setelah user
+   menekan Hitung ulang. */
 function refreshPriceSlab(root) {
   if (!state.analysis || !state.values || !root || !root.querySelectorAll) return;
-  const vals = state.priceStale ? Object.assign({}, state.values, { atGrade: 0 }) : state.values;
-  const txt = fmtIDR(displayValueAtGrade(state.analysis.overall, vals));
+  const txt = fmtIDR(displayValueAtGrade(state.analysis.overall, state.values));
   root.querySelectorAll("[data-live-value-at-grade]").forEach((el) => { el.textContent = txt; });
   const note = root.querySelector("[data-atgrade-note]");
-  if (note) {
-    note.textContent = state.priceStale
-      ? "⚠ Harga di atas sudah kamu ubah — angka “Di grade ini” dari server mungkin sudah tidak cocok. Tekan Hitung ulang untuk memakai angka barumu."
-      : (state.values.atGrade > 0 ? "Angka “Di grade ini” memakai estimasi server." : "");
+  if (note) note.textContent = atGradeNoteText();
+  const recRow = root.querySelector("[data-recalc-row]");
+  if (recRow) {
+    if (Number(state.values.recalcAtGrade) > 0) {
+      recRow.style.display = "";
+      const recVal = recRow.querySelector("[data-recalc-atgrade]");
+      if (recVal) recVal.value = fmtIDR(state.values.recalcAtGrade);
+    } else recRow.style.display = "none";
+  }
+  const recLine = root.querySelector("[data-recalc-line]");
+  if (recLine) {
+    if (Number(state.values.recalcAtGrade) > 0) {
+      recLine.style.display = "";
+      recLine.textContent = "Hitung ulang dari angka di atas: " + fmtIDR(state.values.recalcAtGrade);
+    } else recLine.style.display = "none";
   }
 }
 /* Tombol Simpan koreksi dinonaktifkan sampai identitas valid (S14) +
@@ -5484,7 +5505,7 @@ function buildSavePayload(d, a, v, f, b, opts) {
     cardNumber: d.cardNumber, rarity: d.rarity, language: d.language, confidence: d.confidence,
     centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score,
     overall: a.overall, gradeLabel: gradeLabelFor(a.overall),
-    valueRaw: v.raw, valueAtGrade: displayValueAtGrade(a.overall, state.priceStale ? Object.assign({}, v, { atGrade: 0 }) : v),
+    valueRaw: v.raw, valueAtGrade: displayValueAtGrade(a.overall, v),
     valueGrade9: v.g9, valueGrade10: v.g10,
     detail: {
       reasons: { centering: a.centering.reason, corners: a.corners.reason, edges: a.edges.reason, surface: a.surface.reason },
@@ -5499,6 +5520,9 @@ function buildSavePayload(d, a, v, f, b, opts) {
       },
       basis: d.basis,
       priceStale: Boolean(state.priceStale),
+      /* Defect 2: angka hitung-ulang (bila ada) disimpan sebagai jejak audit;
+         valueAtGrade tetap angka server (displayValueAtGrade, server menang). */
+      recalcAtGrade: (v && Number(v.recalcAtGrade) > 0) ? Math.round(Number(v.recalcAtGrade)) : null,
       /* R16h: sisi yang tidak terukur ikut tersimpan agar Riwayat/Laporan
          tetap mencatatnya setelah reload (sebelumnya hanya di memori). */
       unmeasuredSides: (a && a.unmeasuredSides) || null,
@@ -5528,11 +5552,21 @@ async function persistResult(payload, opts) {
    TIDAK mengubah identitas — hanya menolak persist bila needsConfirm
    masih true, dan meminta user mengoreksi dulu di form hasil. */
 async function confirmAndSaveDraft() {
-  if (!state.det || !state.analysis || !state.draftPayload) return;
-  if (state.det.needsConfirm) {
-    toast("Identitas kartu masih perlu konfirmasi — periksa & koreksi field yang ditandai di form hasil, lalu simpan.");
+  if (!state.det || !state.analysis || !state.draftPayload) {
+    state.saveBlockedReason = "Draf belum siap disimpan — analisis belum selesai atau draf belum dibuat. Coba analisis ulang.";
+    toast("Draf belum siap disimpan — analisis belum selesai atau draf belum dibuat.");
+    renderTab();
     return;
   }
+  /* Defect 1 (opsi a): konfirmasi eksplisit user membuka gate simpan meski
+     flag needsConfirm masih tercatat (jejak audit di identStatus tetap utuh). */
+  if (state.det.needsConfirm && !state.identityConfirmed) {
+    state.saveBlockedReason = "Identitas masih perlu konfirmasi — tekan “Konfirmasi identitas ini” di form di atas, lalu tekan Simpan hasil.";
+    toast("Identitas kartu masih perlu konfirmasi — tekan “Konfirmasi identitas ini” di form di atas, lalu simpan.");
+    renderTab();
+    return;
+  }
+  state.saveBlockedReason = "";
   /* E7: peringatan duplikat (bukan blokir — kartu contoh PYROZAR sengaja
      di-grading berulang; user boleh lanjut). */
   const dup = findDuplicateIdentity(state.allRows, state.det);
@@ -5541,6 +5575,11 @@ async function confirmAndSaveDraft() {
     if (!window.confirm("Kartu ini sudah ada di riwayat (" + (dup.cardName || "(tanpa nama)") + " — grade " + dup.overall + "). Simpan lagi sebagai grading baru?")) return;
   }
   try {
+    /* Defect 1 (5.4): rebuild payload saat simpan agar identitas/harga yang
+       dikoreksi di form hasil ikut tersimpan (bukan identitas lama saat
+       Analisis). buildSavePayload sudah diperbaiki (defect 2): valueAtGrade
+       tetap angka server bila ada. */
+    state.draftPayload = buildSavePayload(state.det, state.analysis, state.values, state.front, state.back);
     const saved = await persistResult(state.draftPayload);
     state.savedId = saved.id;
     state.photoFailed = Boolean(saved.photoFailed);
@@ -5666,6 +5705,7 @@ async function runAnalysis(isSample) {
      sengaja TIDAK dihapus di sini) dan analisis diulang (analisis piksel
      lokal, tanpa biaya server). */
   state.draftPayload = buildSavePayload(detection, combined, vals, state.front, state.back);
+  state.saveBlockedReason = "";
   state.savedId = null;
   state.photoFailed = false;
   state._dupAcknowledged = false;
@@ -5741,7 +5781,7 @@ function resetGrading() {
   state.savedFrontDataUrl = null; state.savedBackDataUrl = null;
   state._dupAcknowledged = false; state.dirty = false;
   state.autoDet = null; state.autoValues = null; state.autoDetectError = ""; state.autoDetecting = false; state.autoDetectStatus = "";
-  state.priceStale = false; state.identityConfirmed = false; state.pendingPersist = false; state.correctionErrors = [];
+  state.priceStale = false; state.identityConfirmed = false; state.pendingPersist = false; state.correctionErrors = []; state.saveBlockedReason = "";
   state.detectError = ""; state.photoSide = "front";
   state._sampleLoaded = false;
   /* Reset berarti mulai bersih — draf sesi ikut dibuang agar tidak
@@ -5775,7 +5815,7 @@ function preAnalysisIdentityFormHtml(ad) {
     const all = current && list.indexOf(current) < 0 ? [current].concat(list) : list;
     return all.map((c) => '<option value="' + esc(c) + '"' + (c === current ? " selected" : "") + ">" + esc(c) + "</option>").join("");
   };
-  const confirmed = state.identityConfirmed && !ad.needsConfirm;
+  const confirmed = state.identityConfirmed;
   return '<div class="slab-frame card" style="margin-top:0.75rem;border-radius:1rem" aria-live="polite">' +
     '<p class="kicker">[ Periksa identitas sebelum Analisis ]</p>' +
     '<h3 class="fd" style="margin-top:0.375rem;font-size:18px;font-weight:700;line-height:1.35">Identitas hasil deteksi — periksa dulu</h3>' +
@@ -5953,7 +5993,7 @@ function renderResultHtml() {
     '<span data-result-conf-chip style="border-radius:999px;padding:0.25rem 0.625rem;font-size:12px;font-weight:700;' + confChip + '">' + confText + "</span>" +
     '<span data-result-needs-badge style="border-radius:999px;padding:0.25rem 0.625rem;font-size:12px;font-weight:700;background:#cf5138;color:#fff' + (det.needsConfirm ? "" : ";display:none") + '">Perlu konfirmasi</span>' + "</div>" +
     (det.confidence > 0 && det.confidence < 60 ? '<p style="margin-top:0.25rem;font-size:12px;color:#e0684f">Keyakinan rendah — periksa dan koreksi identitas kartu di bawah sebelum lanjut.</p>' : "") +
-    (det.needsConfirm ? '<p role="alert" style="margin-top:0.5rem;border:1px solid #cf5138;border-radius:0.5rem;padding:0.5rem 0.625rem;font-size:13px;line-height:1.6;color:#e0684f"><strong>Perlu konfirmasi:</strong> ' + esc(det.consistencyFlags && det.consistencyFlags.length ? det.consistencyFlags.join(" ") : "Keyakinan deteksi di bawah 60%.") + ' Koreksi field yang keliru di bawah ini, lalu tekan Simpan koreksi.</p>' : "") +
+    (det.needsConfirm ? '<p role="alert" style="margin-top:0.5rem;border:1px solid #cf5138;border-radius:0.5rem;padding:0.5rem 0.625rem;font-size:13px;line-height:1.6;color:#e0684f"><strong>Perlu konfirmasi:</strong> ' + esc(det.consistencyFlags && det.consistencyFlags.length ? det.consistencyFlags.join(" ") : "Keyakinan deteksi di bawah 60%.") + ' Koreksi field yang keliru di bawah ini, lalu tekan Konfirmasi identitas ini di bawah ini, kemudian Simpan hasil.</p>' : "") +
     (state.correctionErrors && state.correctionErrors.length ? '<p role="alert" style="margin-top:0.5rem;border:1px solid #cf5138;border-radius:0.5rem;padding:0.5rem 0.625rem;font-size:13px;line-height:1.6;color:#e0684f"><strong>Belum bisa disimpan:</strong> ' + esc(state.correctionErrors.map((e) => e.message).join(" ")) + '</p>' : "") +
     '<div class="mt3 grid2">' +
     '<div><label class="lbl" for="f-category">Jenis / TCG</label><select id="f-category" class="input" data-det="category">' + opts(CATEGORIES, det.category) + "</select></div>" +
@@ -5972,10 +6012,22 @@ function renderResultHtml() {
     '<div style="display:grid;grid-template-columns:1fr auto;gap:0.5rem;margin-top:0.5rem;align-items:end">' +
     '<div><label class="lbl" for="v-atgrade">Di grade ini — dari server (read-only)</label><input id="v-atgrade" class="input" type="text" readonly data-atgrade-display value="' + (values.atGrade > 0 ? fmtIDR(values.atGrade) : "—") + '" /></div>' +
     (values.atGrade > 0 ? '<button type="button" data-action="recalc-atgrade" class="fc" style="border-radius:0.5rem;border:1px solid var(--accent);background:transparent;color:var(--accent-deep);padding:0.5rem 0.875rem;font-size:13px;font-weight:700;min-height:2.5rem">Hitung ulang</button>' : "") + '</div>' +
-    '<p class="dim" data-atgrade-note style="margin-top:0.375rem;font-size:12px;line-height:1.6">' + (state.priceStale ? "⚠ Harga di atas sudah kamu ubah — angka “Di grade ini” dari server mungkin sudah tidak cocok. Tekan Hitung ulang untuk memakai angka barumu." : (values.atGrade > 0 ? "Angka “Di grade ini” memakai estimasi server." : "")) + '</p>' +
+    /* Defect 2 (5.2): nilai hitung-ulang tampil sebagai baris pembanding
+       berlabel — field server "Di grade ini" tidak pernah diganti. */
+    (values.recalcAtGrade > 0 ? '<div data-recalc-row style="display:grid;grid-template-columns:1fr auto;gap:0.5rem;margin-top:0.5rem;align-items:end"><div><label class="lbl">Hitung ulang (dari angka di atas)</label><input class="input" type="text" readonly data-recalc-atgrade value="' + fmtIDR(values.recalcAtGrade) + '" /></div><span class="dim" style="font-size:12px;padding-bottom:0.5rem">pembanding — bukan angka server</span></div>' : "") +
+    '<p class="dim" data-atgrade-note style="margin-top:0.375rem;font-size:12px;line-height:1.6">' + esc(atGradeNoteText()) + '</p>' +
+    /* Defect 1 (5.2): kontrol konfirmasi di form hasil — tanpa ini, koreksi
+       field di form hasil (yang me-reset identityConfirmed) mengunci draf
+       57% tanpa jalan keluar. Hanya tampil bila det.needsConfirm. */
+    (det.needsConfirm
+      ? '<button type="button" data-action="confirm-identity" ' + (state.identityConfirmed ? "disabled" : "") + ' style="margin-top:0.75rem;border-radius:0.5rem;border:0;background:#f5f5f2;color:#0a0a0b;padding:0.5rem 0.875rem;font-size:14px;font-weight:700;min-height:2.5rem">' + (state.identityConfirmed ? "✓ Identitas dikonfirmasi" : "Konfirmasi identitas ini") + "</button>"
+      : "") +
+    /* Defect 1 (5.3): pesan blokir PERSISTEN (bukan hanya toast 2,6 dtk) —
+       tampil di dekat tombol Simpan hasil sampai gate terbuka / simpan berhasil. */
+    (state.saveBlockedReason && state.savedId == null ? '<p role="alert" data-save-blocked style="margin-top:0.5rem;border:1px solid #cf5138;border-radius:0.5rem;padding:0.5rem 0.625rem;font-size:13px;line-height:1.6;color:#e0684f"><strong>Belum bisa disimpan:</strong> ' + esc(state.saveBlockedReason) + "</p>" : "") +
     (state.savedId == null
       ? '<button type="button" data-action="save-draft" style="margin-top:0.75rem;border-radius:0.5rem;border:0;background:#f5f5f2;color:#0a0a0b;padding:0.5rem 0.875rem;font-size:14px;font-weight:700;min-height:2.5rem">Simpan hasil</button>' +
-        '<p class="dim" style="margin-top:0.375rem;font-size:12px;line-height:1.6">Draf lokal — belum tersimpan ke riwayat. Periksa identitas di atas' + (det.needsConfirm ? ", konfirmasi dulu identitas yang ditandai “Perlu konfirmasi”," : "") + ' lalu tekan Simpan hasil. Menutup halaman sebelum simpan akan membuang draf ini (foto tetap tersimpan sebagai draf sesi).</p>'
+        '<p class="dim" style="margin-top:0.375rem;font-size:12px;line-height:1.6">Draf lokal — belum tersimpan ke riwayat. Periksa identitas di atas' + (det.needsConfirm ? ", tekan “Konfirmasi identitas ini” di bawah ini," : "") + ' lalu tekan Simpan hasil. Menutup halaman sebelum simpan akan membuang draf ini (foto tetap tersimpan sebagai draf sesi).</p>'
       : state.dirty
       ? '<button type="button" data-action="save-correction" ' + (state.savingCorrection ? "disabled" : "") + ' style="margin-top:0.75rem;border-radius:0.5rem;border:0;background:#f5f5f2;color:#0a0a0b;padding:0.5rem 0.875rem;font-size:14px;font-weight:700;min-height:2.5rem">' + (state.savingCorrection ? "Menyimpan…" : "Simpan koreksi") + "</button>"
       : '<p style="margin-top:0.75rem;font-size:12px;color:#0e9f6e">✓ Tersimpan di riwayat grading di bawah.</p>') +
@@ -6017,9 +6069,10 @@ function renderResultHtml() {
       [["Raw / mentah", values.raw], ["Grade 9", values.g9], ["Grade 10", values.g10]].map((cell) =>
         '<div style="border-radius:0.5rem;background:var(--surface2);padding:0.625rem 0.5rem"><p style="font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;margin:0" class="dim">' + cell[0] + '</p><p class="fd" style="margin-top:0.125rem;font-size:14px;font-weight:900">' + fmtIDR(cell[1]) + "</p></div>"
       ).join("") + "</div>" +
-      '<p class="fd" style="margin-top:0.75rem;text-align:center;font-size:22px;font-weight:900">Di grade ' + a.overall.toFixed(1) + " kamu: " + '<span data-live-value-at-grade>' + fmtIDR(displayValueAtGrade(a.overall, values)) + "</span>" + "</p>";
+      '<p class="fd" style="margin-top:0.75rem;text-align:center;font-size:22px;font-weight:900">Di grade ' + a.overall.toFixed(1) + " kamu: " + '<span data-live-value-at-grade>' + fmtIDR(displayValueAtGrade(a.overall, values)) + "</span>" + "</p>" +
+      (values.recalcAtGrade > 0 ? '<p class="dim" data-recalc-line style="margin-top:0.25rem;text-align:center;font-size:12px">Hitung ulang dari angka di atas: ' + fmtIDR(values.recalcAtGrade) + "</p>" : "");
   } else {
-    html += '<p class="dim" style="margin-top:0.25rem;font-size:14px">Estimasi nilai belum diisi untuk kartu ini — isi angka raw / grade 9 / grade 10 di kartu identitas di atas (dari harga pasar kartumu), lalu simpan koreksi.</p>';
+    html += '<p class="dim" style="margin-top:0.25rem;font-size:14px">Estimasi nilai belum diisi untuk kartu ini — isi angka raw / grade 9 / grade 10 di kartu identitas di atas (dari harga pasar kartumu), lalu simpan hasilnya.</p>';
   }
   /* R12: basis (catatan deteksi + stempel koreksi manual) selalu dirender
      bila ada — dulu hilang bila raw = 0. */
@@ -6678,6 +6731,10 @@ function bindTabEvents(root) {
         recheckDetection(state.det);
         markIdentityCorrected(state.det);
         state.identityConfirmed = false;
+        /* Defect 1: edit me-reset konfirmasi — tombol konfirmasi di form
+           hasil harus aktif lagi agar user bisa mengonfirmasi identitas baru. */
+        const cbtn = root.querySelector('button[data-action="confirm-identity"]');
+        if (cbtn && state.det.needsConfirm) { cbtn.disabled = false; cbtn.textContent = "Konfirmasi identitas ini"; }
         refreshIdentityBadges(root);
       }
       state.dirty = true;
@@ -6716,6 +6773,9 @@ function bindTabEvents(root) {
          (R9). Bila atGrade server masih ada, ia ditandai basi; slab
          "Di grade ini" dihitung ulang live dari angka yang terlihat. */
       if (state.values.atGrade > 0) state.priceStale = true;
+      /* Defect 2: harga diubah lagi → nilai hitung-ulang lama bukan lagi
+         turunan dari angka yang terlihat; hapus agar tidak menyesatkan. */
+      if (state.values) delete state.values.recalcAtGrade;
       state.dirty = true;
       syncDirtyUi(root);
       refreshPriceSlab(root);
@@ -6869,19 +6929,31 @@ document.addEventListener("click", (e) => {
   } else if (action === "confirm-identity") {
     /* E1: konfirmasi eksplisit identitas hasil deteksi — membuka gate
        persist K2 (bahkan bila flag masih ada: user menerima dengan sadar,
-       flag tetap tercatat di identStatus). */
-    if (!state.autoDet) return;
-    recheckDetection(state.autoDet);
+       flag tetap tercatat di identStatus). Di halaman hasil (gStage
+       "result") bekerja pada state.det; di tahap upload pada state.autoDet. */
+    const det = (state.gStage === "result" && state.det) ? state.det : state.autoDet;
+    if (!det) return;
+    recheckDetection(det);
     state.identityConfirmed = true;
-    saveGradingDraft();
-    toast(state.autoDet.needsConfirm
-      ? "Identitas dikonfirmasi dengan catatan: " + (state.autoDet.consistencyFlags[0] || "perlu konfirmasi")
+    state.saveBlockedReason = "";
+    /* saveGradingDraft hanya berlaku di tahap upload — di tahap result ia
+       justru MENGHAPUS draf sesi (lihat guard-nya), jadi jangan dipanggil. */
+    if (state.gStage !== "result") saveGradingDraft();
+    toast(det.needsConfirm
+      ? "Identitas dikonfirmasi dengan catatan: " + (det.consistencyFlags[0] || "perlu konfirmasi")
       : "Identitas dikonfirmasi — siap dianalisis.");
     renderTab();
   } else if (action === "recalc-atgrade") {
-    /* R9: hitung ulang "Di grade ini" dari angka yang terlihat — aksi
-       eksplisit user, bukan penol-an diam-diam. */
-    if (state.values) state.values.atGrade = 0;
+    /* R9 (fix defect 2): hitung ulang "Di grade ini" dari angka yang
+       terlihat — TANPA menghapus angka server. Nilai hitung-ulang disimpan
+       terpisah (state.values.recalcAtGrade) dan tampil sebagai pembanding
+       berlabel; values.atGrade (server) tidak disentuh. */
+    if (state.values && state.analysis) {
+      state.values.recalcAtGrade = displayValueAtGrade(
+        state.analysis.overall,
+        Object.assign({}, state.values, { atGrade: 0 })
+      );
+    }
     state.priceStale = false;
     state.dirty = true;
     renderTab();
