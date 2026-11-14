@@ -13,18 +13,16 @@
       rel="stylesheet"
     />
     <!--
-      TEG — SINGLE FILE. Seluruh aplikasi (6 tab: Beranda, Grading
-      Digital, Pop Report, Standar Analisis, Pengaturan Brand, Deploy
-      + laporan QR ?report=<id>) hidup di file index.html ini saja:
-      CSS tertanam di blok style di bawah, semua JS tertanam di akhir body.
+      TEG — SINGLE FILE. Seluruh aplikasi (4 tab: Beranda, Grading
+      Digital, Pop Report, Standar Analisis + laporan QR ?report=<id>)
+      hidup di file index.html ini saja: CSS tertanam di blok style
+      di bawah, semua JS tertanam di akhir body.
       Pindah tab = SPA (hash #grading, #pop, dst, tanpa reload).
-      Satu-satunya file pendamping adalah gambar di folder assets/.
-      Deploy: upload index.html + folder assets/ ke root repo GitHub
-      Pages — selesai. Backend tetap Supabase project tera-grade.
+      Backend tetap Supabase project tera-grade.
     -->
     <script>
       window.TG_PAGE = (function () {
-        var tabs = ["beranda", "grading", "pop", "standar", "brand", "deploy"];
+        var tabs = ["beranda", "grading", "pop", "standar"];
         var h = (window.location.hash || "").replace("#", "");
         if (new URLSearchParams(window.location.search).get("report")) return "beranda";
         return tabs.indexOf(h) >= 0 ? h : "beranda";
@@ -220,12 +218,6 @@
             details.faq summary { cursor: pointer; list-style: none; }
             details.faq summary::-webkit-details-marker { display: none; }
       
-      /* Deploy */
-            .sqlbox {
-              background: #0d120f; border: 1px solid var(--border); border-radius: 0.75rem; padding: 0.75rem;
-              font-family: "JetBrains Mono", monospace; font-size: 11.5px; line-height: 1.55; color: #d8e2db;
-              overflow-x: auto; white-space: pre; max-height: 26rem; overflow-y: auto;
-            }
             .code-inline { font-family: "JetBrains Mono", monospace; font-size: 0.85em; background: var(--surface2); border: 1px solid var(--border); border-radius: 0.3rem; padding: 0.05rem 0.35rem; word-break: break-all; }
             .banner, .m-banner {
               border-radius: 1rem; padding: 0.85rem 1rem; font-size: 13.5px; line-height: 1.55;
@@ -567,7 +559,7 @@ details.faq summary:hover { color: var(--gold-deep); }
      M08 components · komponen tampilan bersama (molecules/organisms)
      M09 page-home  · halaman Beranda + Standar Analisis
      M10 page-grade · halaman Grading Digital + Deteksi Otomatis
-     M11 page-data  · halaman Pop Report + Brand + Deploy
+     M11 page-data  · halaman Pop Report
      M12 page-report· halaman Laporan (?report=<id>)
      M14 app        · router tab, event global, bootstrap (INIT)
    Registry: window.TG.modules — cek di konsol: TG.modules
@@ -3756,78 +3748,6 @@ function computePop(rows, query) {
     }));
 }
 
-/* ================= SQL SETUP SUPABASE ================= */
-const SUPABASE_SQL = [
-  "-- ============================================================",
-  "-- TEG — skema Supabase project \"tera-grade\"",
-  "-- (ref sjesshymsvdynbcdbaov, Singapore, Free, owner login GitHub).",
-  "-- Skema ini SUDAH dijalankan di project tersebut — file ini",
-  "-- menyimpannya sebagai referensi & untuk pemulihan. Aman",
-  "-- dijalankan ulang: kebijakan lama dijatuhkan dulu.",
-  "-- BUKAN untuk project undangan-digital — jangan jalankan di sana.",
-  "-- ============================================================",
-  "",
-  "-- Skema LIVE terverifikasi lewat REST API (Nov 2026):",
-  "create table if not exists public.tera_grades (",
-  "  id uuid primary key, -- tanpa default server: web mengirim UUID",
-  "  created_at timestamptz not null default now(),",
-  "  tcg text not null default '',",
-  "  card_name text not null default '',",
-  "  set_name text not null default '',",
-  "  year int,",
-  "  card_number text not null default '',",
-  "  rarity text not null default '',",
-  "  overall_grade numeric not null default 0,",
-  "  grade_label text not null default '',",
-  "  subgrades jsonb not null default '{}'::jsonb, -- skor centering/corners/edges/surface + language + confidence + detail lengkap",
-  "  findings jsonb not null default '[]'::jsonb, -- temuan per area",
-  "  estimates jsonb not null default '{}'::jsonb, -- raw / atGrade / grade9 / grade10",
-  "  photo_front_url text,",
-  "  photo_back_url text",
-  ");",
-  "",
-  "create table if not exists public.tera_settings (",
-  "  key text primary key, -- key-value: brand_name / cert_prefix / tagline",
-  "  value text not null default ''",
-  ");",
-  "",
-  "-- Row Level Security — sama persis dengan yang LIVE di tera-grade:",
-  "-- publik (anon key) hanya SELECT + INSERT. Tidak ada DELETE /",
-  "-- UPDATE untuk publik: hapus & ubah data hanya oleh owner dari",
-  "-- Supabase Dashboard setelah login pakai GitHub. Ini yang bikin",
-  "-- anon key aman tampil di frontend GitHub Pages.",
-  "alter table public.tera_grades enable row level security;",
-  "alter table public.tera_settings enable row level security;",
-  "",
-  "drop policy if exists \"tera_grades publik baca\" on public.tera_grades;",
-  "drop policy if exists \"tera_grades publik tambah\" on public.tera_grades;",
-  "drop policy if exists \"tera_grades publik hapus\" on public.tera_grades;",
-  "create policy \"tera_grades publik baca\" on public.tera_grades",
-  "  for select using (true);",
-  "create policy \"tera_grades publik tambah\" on public.tera_grades",
-  "  for insert with check (true);",
-  "drop policy if exists \"tera_settings publik baca\" on public.tera_settings;",
-  "drop policy if exists \"tera_settings publik ubah\" on public.tera_settings;",
-  "drop policy if exists \"tera_settings publik update\" on public.tera_settings;",
-  "create policy \"tera_settings publik baca\" on public.tera_settings",
-  "  for select using (true);",
-  "create policy \"tera_settings publik ubah\" on public.tera_settings",
-  "  for insert with check (true);",
-  "",
-  "-- Bucket Storage untuk foto kartu (publik, maks 5 MB, gambar saja)",
-  "insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)",
-  "values ('grading-photos', 'grading-photos', true, 5242880, array['image/jpeg','image/png','image/webp'])",
-  "on conflict (id) do nothing;",
-  "",
-  "drop policy if exists \"foto publik baca\" on storage.objects;",
-  "drop policy if exists \"foto publik upload\" on storage.objects;",
-  "drop policy if exists \"foto publik hapus\" on storage.objects;",
-  "create policy \"foto publik baca\" on storage.objects",
-  "  for select using (bucket_id = 'grading-photos');",
-  "create policy \"foto publik upload\" on storage.objects",
-  "  for insert with check (bucket_id = 'grading-photos');",
-].join("\n");
-
 
 "use strict";
 TG.register("M07-state");
@@ -3933,12 +3853,12 @@ function renderModeBanner() {
     dot.classList.add("demo");
     st.textContent = "1 Langkah Lagi";
     b.classList.remove("ok");
-    b.innerHTML = "<strong>Project Supabase tera-grade sudah dibuat &amp; URL-nya sudah terpasang — tinggal 1 langkah.</strong> Analisis grading jalan penuh di browser ini, tapi riwayat &amp; laporan QR masih mode demo (hanya hidup selama tab terbuka). Untuk mengaktifkan mode publik: login <strong>supabase.com pakai GitHub</strong> → project <strong>tera-grade</strong> → Settings → API → copy <span class=\"code-inline\">anon public</span> key → tempel ke <span class=\"code-inline\">SUPABASE_ANON_KEY</span> di blok konfigurasi paling atas file ini. Panduan lengkapnya ada di tab <strong>Deploy</strong>.";
+    b.innerHTML = "<strong>Project Supabase tera-grade sudah dibuat &amp; URL-nya sudah terpasang — tinggal 1 langkah.</strong> Analisis grading jalan penuh di browser ini, tapi riwayat &amp; laporan QR masih mode demo (hanya hidup selama tab terbuka). Untuk mengaktifkan mode publik: login <strong>supabase.com pakai GitHub</strong> → project <strong>tera-grade</strong> → Settings → API → copy <span class=\"code-inline\">anon public</span> key → tempel ke <span class=\"code-inline\">SUPABASE_ANON_KEY</span> di blok konfigurasi paling atas file ini.";
   } else {
     dot.classList.add("demo");
     st.textContent = "Mode Demo";
     b.classList.remove("ok");
-    b.innerHTML = "<strong>Mode demo — Supabase belum terhubung.</strong> Analisis grading jalan penuh di browser ini, tapi riwayat &amp; laporan QR hanya hidup selama tab terbuka. Isi <span class=\"code-inline\">SUPABASE_URL</span> &amp; <span class=\"code-inline\">SUPABASE_ANON_KEY</span> dari project <strong>tera-grade</strong> — panduan lengkapnya ada di tab <strong>Deploy</strong>.";
+    b.innerHTML = "<strong>Mode demo — Supabase belum terhubung.</strong> Analisis grading jalan penuh di browser ini, tapi riwayat &amp; laporan QR hanya hidup selama tab terbuka. Isi <span class=\"code-inline\">SUPABASE_URL</span> &amp; <span class=\"code-inline\">SUPABASE_ANON_KEY</span> dari project <strong>tera-grade</strong>.";
   }
 }
 function renderMastStats() {
@@ -4188,7 +4108,7 @@ function qrPanelHtml(id, compact) {
     '<div style="min-width:0"><p class="kicker">[ Laporan Kekurangan ]</p>' +
     '<h3 class="fd" style="margin-top:0.25rem;font-size:18px;font-weight:700;line-height:1.35">Scan QR — kekurangan kartumu di mana saja</h3>' +
     '<p class="dim" style="margin-top:0.25rem;font-size:13px;line-height:1.6">QR ini membuka halaman laporan lengkap kartu ini: setiap kekurangan per area (sudut, tepi, permukaan, centering), angka hasil ukurnya, pita Standar Analisis yang kena, foto zoom tiap area bermasalah, dan foto kartu dengan penanda posisi cacatnya.' +
-    (SB.enabled ? "" : ' <strong style="color:var(--gold)">Catatan mode demo:</strong> laporan hanya bisa dibuka dari tab ini selama sesi berjalan — tempel anon key Supabase tera-grade (lihat tab Deploy) agar bisa di-scan dari HP lain.') + "</p>" +
+    (SB.enabled ? "" : ' <strong style="color:var(--gold)">Catatan mode demo:</strong> laporan hanya bisa dibuka dari tab ini selama sesi berjalan — tempel anon key Supabase tera-grade agar bisa di-scan dari HP lain.') + "</p>" +
     '<div class="row-wrap mt2">' +
     '<button type="button" data-action="open-report" data-id="' + esc(String(id)) + '" class="fc" style="border-radius:0.5rem;border:1px solid var(--accent);background:transparent;color:var(--accent-deep);padding:0.5rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.5rem">Buka laporan lengkap</button>' +
     "</div></div></div></div>" +
@@ -5380,8 +5300,6 @@ function renderPop() {
   html += "</section>";
   return html;
 }
-/* ================= TAB: PENGATURAN BRAND ================= */
-
 /* ===== M09b · STANDAR ANALISIS (dulu assets/page-standar.js) ===== */
 "use strict";
 TG.register("M09b-page-standar");
@@ -5431,89 +5349,6 @@ function renderStandards() {
       '<p class="dim" style="display:flex;align-items:center;padding:0.75rem 0.875rem;font-size:14px;line-height:1.6;margin:0">' + esc(row[2]) + "</p></div>"
     ).join("") + "</div></div>";
   html += '<p class="dim" style="margin-top:1.25rem;border:1px dashed var(--border);border-radius:0.75rem;padding:0.75rem 1rem;font-size:13px;line-height:1.65"><strong style="color:var(--text)">Batasan yang jujur:</strong> analisis ini membaca foto, bukan memegang kartu. Goresan sangat halus, tekstur permukaan yang hanya terasa dengan jari, dan cacat di bawah pantulan cahaya bisa tidak tertangkap kamera. Karena itu setiap hasil dilabeli Grading Digital / Estimasi, dan foto yang memenuhi Standar Foto memberi hasil yang paling bisa dipertanggungjawabkan.</p>';
-  html += "</section>";
-  return html;
-}
-
-/* ===== M11b · BRAND (dulu assets/page-brand.js) ===== */
-"use strict";
-TG.register("M11b-page-brand");
-/* === MODUL M11b - page-brand - HALAMAN: PENGATURAN BRAND === */
-function renderBrand() {
-  const s = state.settings;
-  let html = '<section aria-label="Pengaturan brand"><p class="kicker">[ Identitas Brand ]</p>' +
-    '<h2 class="h-page">Pengaturan Brand</h2>' +
-    '<p class="dim" style="margin-top:0.375rem;font-size:14px">Nama brand grading, awalan monogram, dan tagline yang tampil di label web ini.</p>' +
-    (SB.enabled
-      ? '<p class="banner ok" style="margin-top:0.75rem">Supabase <strong>tera-grade</strong> terhubung: penyimpanan pertama dari web ini menulis baris brand ke tabel <span class="code-inline">tera_settings</span>. Setelah itu brand terkunci untuk publik (RLS hanya baca + tambah) — perubahan berikutnya dilakukan owner dari Supabase Dashboard: login pakai GitHub → Table Editor → <span class="code-inline">tera_settings</span>.</p>'
-      : '<p class="banner" style="margin-top:0.75rem">Mode demo: perubahan brand hanya berlaku selama tab ini terbuka. Project Supabase <strong>tera-grade</strong> sudah dibuat dan URL-nya sudah terpasang — setelah anon key ditempel (login supabase.com pakai GitHub → Settings → API), pengaturan tersimpan di tabel <span class="code-inline">tera_settings</span> dan tampil untuk semua pengunjung.</p>') +
-    '<form data-aos="fade-up" data-aos-duration="1000" id="brandForm" class="slab-frame card stack" style="margin-top:1rem;border-radius:1rem">' +
-    '<div class="grid2">' +
-    '<div><label class="lbl" for="set-brand">Nama brand grading</label><input id="set-brand" class="input" value="' + esc(s.brandName) + '" /></div>' +
-    '<div><label class="lbl" for="set-prefix">Monogram brand (kotak logo)</label><input id="set-prefix" class="input" value="' + esc(s.certPrefix) + '" maxlength="6" /></div>' +
-    '<div class="span2"><label class="lbl" for="set-tagline">Tagline (di bawah nama brand)</label><input id="set-tagline" class="input" value="' + esc(s.tagline) + '" placeholder="Kosongkan untuk tagline bawaan" /></div>' +
-    "</div>" +
-    '<button type="submit" class="btn-gold fd" id="brandSaveBtn" style="width:100%;border-radius:0.75rem;padding:0.75rem 1rem;font-size:18px;font-weight:700;min-height:3rem">Simpan Pengaturan</button>' +
-    '<p class="small" id="brandMsg" style="margin:0"></p>' +
-    "</form></section>";
-  return html;
-}
-/* ================= TAB: DEPLOY ================= */
-
-/* ===== M11c · DEPLOY (dulu assets/page-deploy.js) ===== */
-"use strict";
-TG.register("M11c-page-deploy");
-/* === MODUL M11c - page-deploy - HALAMAN: DEPLOY === */
-function renderDeploy() {
-  const connected = SB.enabled;
-  const check = (done, label, note) =>
-    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:13.5px;line-height:1.55"><span aria-hidden="true" style="margin-top:1px;display:flex;height:1.15rem;width:1.15rem;flex-shrink:0;align-items:center;justify-content:center;border-radius:999px;font-size:11px;font-weight:900;color:#fff;background:' + (done ? "#2e7d5b" : "#c39a2b") + '">' + (done ? "✓" : "!") + '</span><span><strong style="color:var(--text)">' + label + '</strong> <span class="dim">— ' + note + "</span></span></li>";
-  let html = '<section aria-label="Panduan deploy GitHub Pages dan Supabase"><p class="kicker">[ Deploy untuk Umum ]</p>' +
-    '<h2 class="h-page">GitHub Pages + Supabase tera-grade</h2>' +
-    '<p class="dim" style="margin-top:0.375rem;font-size:14px;line-height:1.65">Arsitektur versi ini: <strong style="color:var(--text)">frontend statis</strong> (satu file <span class="code-inline">index.html</span> — keenam tab, seluruh gaya, dan mesin gradingnya sudah menyatu di dalam file itu — plus folder <span class="code-inline">assets/</span> yang isinya hanya gambar) di-host gratis di GitHub Pages, dan <strong style="color:var(--text)">backend Supabase project khusus TEG</strong> — nama <span class="code-inline">tera-grade</span>, ref <span class="code-inline">sjesshymsvdynbcdbaov</span>, region Singapore, Free plan ($0, tanpa kartu) — untuk database &amp; foto. Project ini <strong style="color:var(--text)">terpisah total</strong> dari project undangan-digital / INVITO, yang tidak disentuh. Analisis fotonya tetap berjalan di browser pengunjung, jadi tidak ada biaya server sama sekali.</p>';
-  /* Panel login GitHub */
-  html += '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="margin-top:1rem;border-radius:1rem"><p class="kicker">[ Akses Owner ]</p>' +
-    '<h3 class="fd" style="margin-top:0.25rem;font-size:20px;font-weight:900;line-height:1.25">Login Supabase: pakai GitHub saja</h3>' +
-    '<p class="dim" style="margin-top:0.375rem;font-size:14px;line-height:1.65">Tidak ada akun Supabase terpisah, tidak ada password baru, tidak ada kartu. Setiap kali owner perlu masuk dashboard — lihat publishable key, lihat / hapus data, ubah brand — jalurnya selalu sama:</p>' +
-    '<ol class="mt2 stack" style="list-style:none;margin-left:0;padding:0">' +
-    '<li style="font-size:14px;line-height:1.6"><span class="fm" style="font-weight:700;color:var(--gold-deep)">1.</span> Buka <a href="https://supabase.com" target="_blank" rel="noopener" style="color:var(--accent-deep);font-weight:600">supabase.com</a> → <strong style="color:var(--text)">Sign In</strong>.</li>' +
-    '<li style="font-size:14px;line-height:1.6"><span class="fm" style="font-weight:700;color:var(--gold-deep)">2.</span> Klik <strong style="color:var(--text)">Continue with GitHub</strong> → masuk pakai akun GitHub pemilik (yang sama untuk repo GitHub Pages).</li>' +
-    '<li style="font-size:14px;line-height:1.6"><span class="fm" style="font-weight:700;color:var(--gold-deep)">3.</span> Pilih project <span class="code-inline">tera-grade</span> (Singapore). Project <span class="code-inline">undangan-digital</span> bukan tempat data grading — jangan diutak-atik untuk web ini.</li>' +
-    '<li style="font-size:14px;line-height:1.6"><span class="fm" style="font-weight:700;color:var(--gold-deep)">4.</span> Selesai — dari dashboard itu owner punya akses penuh (Table Editor, Storage, Settings → API), sementara pengunjung publik hanya bisa baca + tambah lewat publishable key karena RLS.</li></ol>' +
-    '<p class="dim" style="margin-top:0.625rem;font-size:12.5px;line-height:1.6">Kalau GitHub meminta kode verifikasi / 2FA, itu dari GitHub-nya langsung — selesaikan di halaman GitHub, jangan bagikan kodenya ke siapa pun. Database password project juga tidak pernah dipakai file web ini; yang dipakai hanya publishable key.</p></article>';
-  /* Status checklist */
-  html += '<div class="banner ' + (connected ? "ok" : "") + '" style="margin-top:0.75rem"><strong>Status setup saat ini:</strong>' +
-    '<ul style="list-style:none;margin:0.5rem 0 0;padding:0" class="stack">' +
-    check(true, "Project tera-grade dibuat", "Singapore, Free plan, akses owner via login GitHub; terpisah dari undangan-digital.") +
-    check(true, "Tabel & bucket dibuat", "tera_grades + tera_settings (RLS aktif, publik hanya SELECT + INSERT) dan bucket publik grading-photos (maks 5 MB, gambar saja).") +
-    check(Boolean(SUPABASE_URL), "Project URL terpasang di file ini", SUPABASE_URL ? esc(SUPABASE_URL) : "masih kosong") +
-    check(connected, "Key Supabase terpasang (utama + fallback)", connected ? "web membaca & menulis ke Supabase tera-grade — mode publik aktif, riwayat & laporan QR tersimpan di tera_grades dan bisa dibuka dari perangkat mana pun." : "periksa SUPABASE_PUBLISHABLE_KEY + SUPABASE_LEGACY_ANON_KEY di blok konfigurasi file ini, lalu upload ulang.") +
-    check(false, "Upload ke GitHub Pages", "langkah 04 di bawah — dilakukan dari akun GitHub yang sama.") +
-    "</ul></div>";
-  const step = (n, title, bodyHtml) =>
-    '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="border-radius:1rem"><div style="display:flex;gap:0.75rem"><span class="fm" style="margin-top:2px;font-size:14px;font-weight:700;color:var(--gold-deep)">' + n + '</span><div style="min-width:0;flex:1"><h3 class="fd" style="font-size:17px;font-weight:700;line-height:1.35">' + title + '</h3><div class="dim" style="margin-top:0.375rem;font-size:14px;line-height:1.65">' + bodyHtml + "</div></div></div></article>";
-  html += '<div class="mt4 stack-lg">' +
-    step("01 ✓", "Project Supabase tera-grade — sudah dibuat",
-      "Project <span class=\"code-inline\">tera-grade</span> (ref <span class=\"code-inline\">sjesshymsvdynbcdbaov</span>) sudah live: Singapore (Southeast Asia), Free plan, database sehat. Dibuat &amp; dikelola lewat <strong style=\"color:var(--text)\">login GitHub</strong> — lihat panel Akses Owner di atas. Tidak perlu membuat project lagi, dan jangan gabungkan dengan undangan-digital.") +
-    step("02 ✓", "Skema database & foto — sudah dijalankan",
-      "Tabel <span class=\"code-inline\">tera_grades</span> &amp; <span class=\"code-inline\">tera_settings</span> serta bucket <span class=\"code-inline\">grading-photos</span> sudah ada di project tera-grade, lengkap dengan RLS publik <strong style=\"color:var(--text)\">SELECT + INSERT saja</strong> (tanpa DELETE / UPDATE untuk pengunjung). SQL di bawah adalah salinan persis skemanya — disimpan sebagai referensi / pemulihan, aman dijalankan ulang di SQL Editor project tera-grade bila suatu saat diperlukan." +
-      '<div class="mt2"><div class="sqlbox" id="sqlBox">' + esc(SUPABASE_SQL) + "</div>" +
-      '<button type="button" data-action="copy-sql" class="btn-gold fc" style="margin-top:0.5rem;border-radius:0.5rem;padding:0.625rem 1rem;font-size:13px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;min-height:2.75rem">Salin SQL skema</button></div>') +
-    step("03 ✓", "Key Supabase — terpasang, dengan fallback otomatis",
-      "Project URL (<span class=\"code-inline\">https://sjesshymsvdynbcdbaov.supabase.co</span>) dan <strong style=\"color:var(--text)\">publishable key</strong> project <span class=\"code-inline\">tera-grade</span> <strong style=\"color:var(--text)\">sudah terisi</strong> di blok konfigurasi paling atas file ini — tidak ada lagi langkah paste manual. Web memakai <strong style=\"color:var(--text)\">publishable key sebagai key utama</strong> dan <strong style=\"color:var(--text)\">legacy anon JWT sebagai fallback otomatis</strong>: bila server menolak key utama (401/403 — misalnya setelah rotasi JWT signing key project), request dicoba ulang dengan legacy key dan key yang berhasil diingat untuk request berikutnya, jadi koneksi tidak putus hanya karena satu format key bermasalah. Publishable key adalah format baru Supabase (pengganti legacy anon JWT yang pensiun awal 2027) dan memang dirancang untuk tampil di frontend — yang menjaga data adalah RLS (publik cuma bisa baca + tambah), bukan kerahasiaan key-nya. Banner di atas halaman berubah jadi hijau <strong style=\"color:var(--text)\">“Supabase Terhubung”</strong> dan riwayat / Pop Report / laporan QR kini tersimpan di tabel <span class=\"code-inline\">tera_grades</span>, bukan demo sesi saja. <strong style=\"color:var(--text)\">Jangan pernah</strong> memakai <span class=\"code-inline\">service_role</span> / secret key atau database password di file ini. Owner melihat / merotasi key dari <a href=\"https://supabase.com\" target=\"_blank\" rel=\"noopener\" style=\"color:var(--accent-deep);font-weight:600\">supabase.com</a> — login <strong style=\"color:var(--text)\">pakai GitHub</strong> → tera-grade → Settings → API.") +
-    step("04", "Upload ke GitHub & aktifkan Pages",
-      "Pakai akun GitHub yang sama dengan login Supabase tadi. Buat repo GitHub (publik agar GitHub Pages gratis), upload <span class=\"code-inline\">index.html</span> dan folder <span class=\"code-inline\">assets/</span> (isi gambar) apa adanya ke root repo, lalu <strong style=\"color:var(--text)\">Settings → Pages → Deploy from branch (main / root)</strong>. Dalam ±1 menit web live di <span class=\"code-inline\">https://&lt;username&gt;.github.io/&lt;repo&gt;/</span> — pola yang sama seperti web INVITO kamu. Custom domain bisa dipasang belakangan dari menu yang sama.") +
-    step("05", "Uji alur publiknya",
-      "Buka alamat GitHub Pages-nya dari HP lain / mode incognito: grading kartu contoh → hasil tersimpan → scan QR-nya dari HP kedua → halaman laporan harus terbuka lengkap dengan zoom area bermasalah. Kalau laporan terbuka dari perangkat lain, berarti rantai GitHub Pages → Supabase tera-grade sudah utuh. Banner di atas halaman ini juga berubah jadi hijau “Supabase Terhubung”.") +
-    "</div>";
-  html += '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="margin-top:1rem;border-radius:1rem"><h3 class="fc" style="font-size:14px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Yang jalan di mana</h3>' +
-    '<div class="mt2 stack small" style="line-height:1.65">' +
-    '<p style="margin:0"><strong>Di browser pengunjung (gratis, tanpa server):</strong> cek Standar Foto, analisis piksel centering / corners / edges / surface, temuan per area, pembuatan QR.</p>' +
-    '<p style="margin:0"><strong>Di Supabase tera-grade:</strong> tabel <span class="code-inline">tera_grades</span> (hasil grading + bukti ukur + temuan), tabel <span class="code-inline">tera_settings</span> (brand), bucket <span class="code-inline">grading-photos</span> (foto depan/belakang). Pop Report &amp; statistik dihitung dari tabel itu, jadi berlaku global untuk semua pengunjung.</p>' +
-    '<p style="margin:0"><strong>Akses owner:</strong> hanya lewat Supabase Dashboard dengan login GitHub. Dari sanalah owner menghapus hasil, mengubah brand yang sudah terkunci, atau memeriksa data mentah — pengunjung web tidak bisa, dan itu memang disengaja.</p>' +
-    '<p style="margin:0"><strong>Identitas &amp; estimasi nilai kartu:</strong> tombol <strong>Deteksi Otomatis</strong> di tab Grading Digital mengirim foto terkompresi ke Edge Function <span class="code-inline">detect-card</span> di Supabase tera-grade — di sanalah AI vision membaca nama/set/tahun/nomor/rarity &amp; estimasi harga, tanpa key AI apa pun di file web ini. Bila fungsi itu belum di-deploy, limit hariannya habis, atau hasilnya tidak valid, web menampilkan pesan ramah dan identitas &amp; estimasi tetap bisa diisi/dikoreksi manual di hasil analisis (kartu contoh terisi otomatis). Analisis kondisinya tetap otomatis penuh dari piksel foto.</p>' +
-    '<p class="dim" style="margin:0">Batas Free plan Supabase (project tera-grade): 500 MB database &amp; 1 GB storage foto — cukup untuk ribuan hasil grading; foto otomatis diperkecil ke maks 1.100 px sebelum upload.</p>' +
-    "</div></article>";
   html += "</section>";
   return html;
 }
@@ -5760,8 +5595,6 @@ const TABS = [
   { id: "grading", label: "Grading Digital" },
   { id: "pop", label: "Pop Report" },
   { id: "standar", label: "Standar Analisis" },
-  { id: "brand", label: "Pengaturan Brand" },
-  { id: "deploy", label: "Deploy" },
 ];
 /* -- MULTI-PAGE: tiap tab adalah halaman .html sendiri. Beranda =
    index.html di akar; tab lain = <id>.html di assets/pages/. -- */
@@ -5907,8 +5740,6 @@ function renderTab() {
   else if (TG_PAGE === "grading") root.innerHTML = renderGrading();
   else if (TG_PAGE === "pop") root.innerHTML = renderPop();
   else if (TG_PAGE === "standar") root.innerHTML = renderStandards();
-  else if (TG_PAGE === "brand") root.innerHTML = renderBrand();
-  else if (TG_PAGE === "deploy") root.innerHTML = renderDeploy();
   bindTabEvents(root);
   bindCornerHandles(root);
   initAnims(root);
@@ -5924,33 +5755,6 @@ function bindTabEvents(root) {
     });
     const search = $("#popSearch", root);
     if (search) search.addEventListener("input", () => { state.popInput = search.value; });
-  }
-  const brandForm = $("#brandForm", root);
-  if (brandForm) {
-    brandForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const btn = $("#brandSaveBtn", root);
-      const msg = $("#brandMsg", root);
-      btn.disabled = true;
-      btn.textContent = "Menyimpan…";
-      try {
-        const next = {
-          brandName: $("#set-brand", root).value.trim() || "TEG",
-          certPrefix: ($("#set-prefix", root).value.trim() || "TEG").toUpperCase().slice(0, 6),
-          tagline: $("#set-tagline", root).value.trim(),
-        };
-        state.settings = await DB.updateSettings(next);
-        applyBrand();
-        msg.textContent = "Pengaturan brand tersimpan.";
-        msg.style.color = "#0fa47a";
-      } catch (err) {
-        msg.textContent = "Gagal menyimpan pengaturan: " + (err && err.message ? err.message : "koneksi");
-        msg.style.color = "#e0684f";
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Simpan Pengaturan";
-      }
-    });
   }
   $$("[data-det]", root).forEach((el) => {
     el.addEventListener("input", () => {
@@ -6116,8 +5920,6 @@ document.addEventListener("click", (e) => {
     state.reportSide = target.getAttribute("data-side");
     const raw = new URLSearchParams(window.location.search).get("report");
     if (raw) void renderReport(raw);
-  } else if (action === "copy-sql") {
-    copyText(SUPABASE_SQL, "SQL skema tersalin — referensi skema project tera-grade (sudah dijalankan).");
   } else if (action === "toggle-history") {
     const id = target.getAttribute("data-id");
     state.expandedId = String(state.expandedId) === String(id) ? null : id;
@@ -6198,7 +6000,7 @@ if (typeof loadSample === "function") {
     $("#statusDot").classList.add("demo");
     $("#statusText").textContent = "Cek Koneksi";
     b.classList.remove("ok");
-    b.innerHTML = "<strong>Konfigurasi Supabase terisi, tapi project tera-grade menolak koneksi:</strong> " + esc(state.rowsError) + ". Web sudah otomatis mencoba publishable key + legacy anon key sebagai fallback dan tetap gagal — periksa lagi key-nya (login supabase.com pakai GitHub → tera-grade → Settings → API) dan pastikan tabel <span class=\"code-inline\">tera_grades</span> ada. Detail lengkap di tab <strong>Deploy</strong>.";
+    b.innerHTML = "<strong>Konfigurasi Supabase terisi, tapi project tera-grade menolak koneksi:</strong> " + esc(state.rowsError) + ". Web sudah otomatis mencoba publishable key + legacy anon key sebagai fallback dan tetap gagal — periksa lagi key-nya (login supabase.com pakai GitHub → tera-grade → Settings → API) dan pastikan tabel <span class=\"code-inline\">tera_grades</span> ada.";
   }
   const raw = new URLSearchParams(window.location.search).get("report");
   if (raw) {
