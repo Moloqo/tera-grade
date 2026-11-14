@@ -4510,7 +4510,7 @@ function renderLanding() {
     "@media (min-width:900px){.anat-grid{grid-template-columns:1fr auto 1fr;align-items:center;gap:3.5rem}.anat-col{gap:3.5rem}}" +
     "</style>";
   /* ── BARIS FITUR BESAR bergantian gambar-teks ── */
-  html += '<section aria-label="Cara kerja grading digital" style="margin-top:6rem">' +
+  html += '<section aria-label="How digital grading works" style="margin-top:6rem">' +
     '<p data-aos="fade-up" data-aos-duration="1000" class="kicker" style="text-align:center">[ How It Works ]</p>' +
     '<h3 data-aos="fade-up" data-aos-duration="1000" data-aos-delay="100" class="fd" style="text-align:center;margin-top:0.5rem;font-size:clamp(2rem,4.5vw,3.25rem);font-weight:900;line-height:1.05;letter-spacing:-0.02em">Three steps, straight to a grade</h3>' +
     steps.map((st, i) =>
@@ -4527,7 +4527,7 @@ function renderLanding() {
     "@media (min-width:900px){.feat-row{grid-template-columns:1fr 1fr;gap:4rem}.feat-row.flip .feat-img{order:2}}" +
     "</style>";
   /* ── KENAPA: blok teks polos bergaris atas ── */
-  html += '<section aria-label="Kenapa ' + esc(brand()) + '" style="margin-top:6rem"><p data-aos="fade-up" data-aos-duration="1000" class="kicker">[ Why ' + esc(brand()) + ' ]</p>' +
+  html += '<section aria-label="Why ' + esc(brand()) + '" style="margin-top:6rem"><p data-aos="fade-up" data-aos-duration="1000" class="kicker">[ Why ' + esc(brand()) + ' ]</p>' +
     '<h3 data-aos="fade-up" data-aos-duration="1000" data-aos-delay="100" class="fd" style="margin-top:0.5rem;font-size:clamp(1.8rem,4vw,2.75rem);font-weight:900;line-height:1.1;letter-spacing:-0.02em">Grading you can audit yourself</h3>' +
     '<div class="mt4" style="display:grid;gap:2rem 3.5rem" id="whyGrid">' +
     why.map((w, wi) => '<article data-aos="fade-up" data-aos-duration="1000" data-aos-delay="' + (wi % 2 ? "100" : "50") + '" style="border-top:1px solid #26262b;padding-top:1.25rem"><h4 class="fd" style="font-size:19px;font-weight:700;line-height:1.35">' + w[0] + '</h4><p style="margin-top:0.5rem;font-size:14.5px;line-height:1.7;color:#a9a9ae">' + w[1] + "</p></article>").join("") +
@@ -4579,7 +4579,7 @@ function renderLanding() {
       '<div data-aos="fade-up" data-aos-duration="1000" data-aos-delay="100" style="margin-top:3rem;display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;max-width:52rem;margin-left:auto;margin-right:auto">' +
       '<div><p class="fd" style="font-size:clamp(1.6rem,4vw,2.5rem);font-weight:900;margin:0">' + s.uniqueCards + '</p><p class="fc" style="margin-top:0.4rem;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#9b9ba0">Card Types</p></div>' +
       '<div><p class="fd" style="font-size:clamp(1.6rem,4vw,2.5rem);font-weight:900;margin:0">' + s.gemMint + '</p><p class="fc" style="margin-top:0.4rem;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#9b9ba0">Grade 9.5+</p></div>' +
-      '<div><p class="fd" style="font-size:clamp(1.6rem,4vw,2.5rem);font-weight:900;margin:0">' + (s.averageGrade > 0 ? s.averageGrade.toFixed(1).replace(".", ",") : "—") + '</p><p class="fc" style="margin-top:0.4rem;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#9b9ba0">Rata-Rata Grade</p></div>' +
+      '<div><p class="fd" style="font-size:clamp(1.6rem,4vw,2.5rem);font-weight:900;margin:0">' + (s.averageGrade > 0 ? s.averageGrade.toFixed(1) : "—") + '</p><p class="fc" style="margin-top:0.4rem;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#9b9ba0">Average Grade</p></div>' +
       "</div></section>";
   }
   /* ── STANDAR ringkas ── */
@@ -6319,7 +6319,7 @@ function bandTableHtml(rows) {
 function renderStandards() {
   const bandsFor = (id) => {
     if (id === "centering") return CENTERING_BANDS.map((b) => ({
-      range: b.maxDev === Infinity ? "Deviation > 45 points (ratio " + b.ratio + ")" : "Deviation ≤ " + String(b.maxDev).replace(".", ",") + " poin (rasio " + b.ratio + ")",
+      range: b.maxDev === Infinity ? "Deviation > 45 points (ratio " + b.ratio + ")" : "Deviation ≤ " + String(b.maxDev) + " points (ratio " + b.ratio + ")",
       score: b.score,
     }));
     if (id === "surface") return SURFACE_BANDS.map((b) => ({ range: b.range, score: b.score }));
