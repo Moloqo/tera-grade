@@ -3437,6 +3437,16 @@ function analyzeSide(img, side) {
       return { x: s.x / Math.max(1, p0.w - 1), y: s.y / Math.max(1, p0.h - 1) };
     };
   }
+  /* v27.4 · Trust checks on the RAW warped photo (before capture
+     enhancement — the same input every run, so the fingerprint is stable).
+     Read-only: never touches p, the quad, or any score. */
+  let sideTrust = null;
+  if (detInfo && detInfo.detected && detInfo.warped && detInfo.corners) {
+    try {
+      const quadPx = detInfo.corners.map((c) => [c[0] * p0.w, c[1] * p0.h]);
+      sideTrust = measureTrust(p, quadPx, side, p0.w, p0.h);
+    } catch (e) { sideTrust = null; }
+  }
   /* v27.1 · Capture Enhancement — holo dibaca di warp MENTAH (desain §3.5),
      lalu tiga langkah murni atas p (desain §3.4: lighting -> color -> detail).
      p mentah dipertahankan sebagai pRaw hanya untuk thumbnail before; bila
@@ -3869,7 +3879,7 @@ function analyzeSide(img, side) {
         + (holo ? " Holo/foil detected in the image area — surface threshold raised so holo shine is not read as scratches." : "")
         + (surfaceUncertain ? " Part of the surface is Estimated (stains/glare dominate) — the number is uncertain." : ""),
     },
-    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo, enhance: enhanceInfo, quadChallenge: quadChallenge,
+    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo, enhance: enhanceInfo, quadChallenge: quadChallenge, trust: sideTrust,
   };
 }
 function combineAnalysis(front, back) {
@@ -3879,13 +3889,13 @@ function combineAnalysis(front, back) {
   const _nd = [front, back].filter(Boolean).filter((s) => s.notDetected);
   if (_nd.length) {
     const _f = _nd[0];
-    return { centering: _f.centering, corners: _f.corners, edges: _f.edges, surface: _f.surface, overall: null, rawAvg: null, overallEstimated: true, notDetected: true, cardDetected: false, annotations: [], evidence: _f.evidence, findings: (front ? front.findings : []).concat(back ? back.findings : []), boundsInfo: front ? front.boundsInfo : null, bounds: { front: front ? front.boundsInfo : null, back: back ? back.boundsInfo : null } };
+    return { centering: _f.centering, corners: _f.corners, edges: _f.edges, surface: _f.surface, overall: null, rawAvg: null, overallEstimated: true, notDetected: true, cardDetected: false, annotations: [], evidence: _f.evidence, findings: (front ? front.findings : []).concat(back ? back.findings : []), boundsInfo: front ? front.boundsInfo : null, bounds: { front: front ? front.boundsInfo : null, back: back ? back.boundsInfo : null }, trust: null };
   }
   if (!back) {
     const _subs1 = [front.centering.score, front.corners.score, front.edges.score, front.surface.score].filter((x) => typeof x === "number");
     const _rawAvg1 = _subs1.length ? _subs1.reduce((a, b) => a + b, 0) / _subs1.length : null;
     const overall = _rawAvg1 === null ? null : clampOverall(_rawAvg1);
-    return { centering: front.centering, corners: front.corners, edges: front.edges, surface: front.surface, overall: overall, rawAvg: _rawAvg1, overallEstimated: _subs1.length < 4, annotations: front.annotations, evidence: front.evidence, findings: front.findings, boundsInfo: front.boundsInfo, bounds: { front: front.boundsInfo, back: null } };
+    return { centering: front.centering, corners: front.corners, edges: front.edges, surface: front.surface, overall: overall, rawAvg: _rawAvg1, overallEstimated: _subs1.length < 4, annotations: front.annotations, evidence: front.evidence, findings: front.findings, boundsInfo: front.boundsInfo, bounds: { front: front.boundsInfo, back: null }, trust: front.trust || null };
   }
   const extreme = (c) => Math.abs(c.lrPct - 50) > 32 || Math.abs(c.tbPct - 50) > 32;
   let centering;
@@ -3988,7 +3998,318 @@ function combineAnalysis(front, back) {
     .concat(otherOf(surfaceSide).findings.filter((f) => f.kind === "surface"))
     .sort((a, b) => sevRank[a.severity] - sevRank[b.severity])
     .slice(0, 20);
-  return { centering: centering, corners: corners, edges: edges, surface: surface, overall: overall, rawAvg: _rawAvg, overallEstimated: _subs.length < 4, annotations: front.annotations.concat(back.annotations), evidence: evidence, findings: findings, boundsInfo: front.boundsInfo, bounds: { front: front.boundsInfo, back: back.boundsInfo } };
+  return { centering: centering, corners: corners, edges: edges, surface: surface, overall: overall, rawAvg: _rawAvg, overallEstimated: _subs.length < 4, annotations: front.annotations.concat(back.annotations), evidence: evidence, findings: findings, boundsInfo: front.boundsInfo, bounds: { front: front.boundsInfo, back: back.boundsInfo }, trust: (front && front.trust) || (back && back.trust) || null };
+}
+/* ═══ v27.4 · TRUST & AUTHENTICITY — first-pass photo checks ═══
+   Four checks that NEVER change the grade, the prices, or the quad:
+   (1) Market insights — display only, from the price snapshot the app
+   already has; no sales history is ever invented. (2) Trim detection —
+   measured width/height ratio of the detected quad vs the 63×88 mm
+   standard, plus opposite-edge length mismatch as the edge-straightness
+   proxy available from the fitted quad. (3) Digital fingerprinting —
+   16×16 average hash of the straightened FRONT photo, compared only
+   against fingerprints already stored in TEG's own history.
+   (4) Print/ink/holo anomaly flag — first-pass texture checks on the
+   straightened photo; a flag is a WARNING ("inspect manually"), never
+   a "fake" verdict, and a clean result says "no anomalies detected",
+   never "authentic". All results live in detail.trim / detail.fingerprint
+   / detail.anomaly / detail.fingerprintMatch (detail JSONB, no schema
+   change). Thresholds below were calibrated on the v27.1 regression
+   corpus (38 photos, production side passed to detection): clean photos
+   measure ratio deviation ≤ 9.4% (median 1.2%), opposite-edge mismatch
+   ≤ 19.6%, Laplacian variance ≤ 3284, ink CV ≤ 0.386, bright-pixel
+   spread ≤ 16.4 — no clean corpus photo trips any flag, and the same
+   photo re-graded hashes identically (Hamming 0) while the closest two
+   different cards are 34 bits apart (same card re-photographed: 17). */
+const TRIM_EXPECTED_RATIO = 63 / 88; /* 0.7159 — standard card 63×88 mm */
+const TRIM_RATIO_TOL = 0.12; /* flag when measured ratio deviates > 12% */
+const TRIM_EDGE_TOL = 0.06; /* flag only when opposite edges match within 6% */
+const TRIM_FRAME_FRAC = 0.85; /* quad covering > 85% of the photo = card overflows the frame */
+const FINGERPRINT_MATCH_BITS = 5; /* Hamming distance ≤ 5 of 256 bits */
+const ANOMALY_TEXTURE_MAX = 3600; /* Laplacian variance, first-pass limit */
+const ANOMALY_INK_MAX = 0.42; /* cell-mean luminance CV, first-pass limit */
+const ANOMALY_HOLO_MAX = 20; /* bright-pixel luminance std dev, first-pass limit */
+/* Measured quad geometry vs the 63×88 mm standard. quadPx = 4 corners in
+   original-photo pixels, in the same order as detInfo.corners; imgW/imgH =
+   the original photo size. The measured size is stated assuming the long
+   side is untrimmed (88 mm), so the short side reads 88 × ratio mm.
+   CALIBRATION (v27.1 regression corpus, 38 photos, production side
+   passed to detection): true card outlines measure within ~2% of the
+   standard, but handheld phone photos add perspective noise — clean
+   corpus photos deviate up to 9.4% (ratio) and 19.6% (opposite edges).
+   So the flag bar is deliberately high and guarded: a flag needs a
+   LARGE ratio deviation (> 12%, i.e. the short side off by ~8 mm)
+   AND near-parallel opposite edges (≤ 6%, i.e. a near-frontal photo —
+   a tilted photo distorts the ratio by itself). A small trim (a few
+   millimetres) is BELOW this noise floor and will not flag; a clean
+   result does not prove the card is untrimmed. When the quad covers
+   > 85% of the photo the card overflows the frame, so its full outline
+   is not visible and the check is not measurable. Returns null for bad
+   input. */
+function measureTrim(quadPx, imgW, imgH) {
+  if (!Array.isArray(quadPx) || quadPx.length !== 4) return null;
+  let sides = null;
+  try { sides = quadSideLens(quadPx); } catch (e) { return null; }
+  if (!sides) return null;
+  const avgW = (sides.top + sides.bottom) / 2, avgH = (sides.left + sides.right) / 2;
+  if (!(avgW > 0) || !(avgH > 0)) return null;
+  const ratio = Math.min(avgW, avgH) / Math.max(avgW, avgH);
+  const deviation = Math.abs(ratio - TRIM_EXPECTED_RATIO) / TRIM_EXPECTED_RATIO;
+  /* Edge straightness proxy from the fitted quad: opposite edges of an
+     untrimmed card are parallel and equal; a tilted photo skews them
+     apart, so a large mismatch means "perspective", not "trim". */
+  const edgeResidual = Math.max(Math.abs(sides.top - sides.bottom) / avgW, Math.abs(sides.left - sides.right) / avgH);
+  let areaFrac = null;
+  if (typeof imgW === "number" && typeof imgH === "number" && imgW > 0 && imgH > 0) {
+    try { areaFrac = quadAreaPx(quadPx) / (imgW * imgH); } catch (e) { areaFrac = null; }
+  }
+  const notMeasurable = (areaFrac !== null && areaFrac > TRIM_FRAME_FRAC);
+  const flagged = !notMeasurable && deviation > TRIM_RATIO_TOL && edgeResidual <= TRIM_EDGE_TOL;
+  return {
+    ratio: Math.round(ratio * 10000) / 10000,
+    expectedRatio: Math.round(TRIM_EXPECTED_RATIO * 10000) / 10000,
+    deviation: Math.round(deviation * 10000) / 10000,
+    edgeResidual: Math.round(edgeResidual * 10000) / 10000,
+    flagged: flagged,
+    notMeasurable: notMeasurable,
+    areaFrac: areaFrac !== null ? Math.round(areaFrac * 1000) / 1000 : null,
+    measuredWidthMm: Math.round(88 * ratio * 10) / 10,
+    measuredHeightMm: 88,
+  };
+}
+/* Perceptual hash (average hash): downscale the warped image to 16×16
+   grayscale by block average, one bit per cell vs the mean. 256 bits =
+   a 64-character hex string. The input is the RAW warped photo (before
+   capture enhancement), the same input every run, so the same photo
+   hashes the same way. Returns null for bad input. */
+function averageHash(p) {
+  if (!p || !p.data || !p.w || !p.h || p.w < 16 || p.h < 16) return null;
+  const N = 16, cells = new Array(N * N).fill(0), counts = new Array(N * N).fill(0);
+  const w = p.w, h = p.h, d = p.data;
+  for (let y = 0; y < h; y++) {
+    const cy = Math.min(N - 1, Math.floor((y / h) * N));
+    for (let x = 0; x < w; x++) {
+      const cx = Math.min(N - 1, Math.floor((x / w) * N));
+      const o = (y * w + x) * 4;
+      const g = 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+      const idx = cy * N + cx;
+      cells[idx] += g; counts[idx] += 1;
+    }
+  }
+  let sum = 0;
+  for (let i = 0; i < cells.length; i++) { cells[i] = counts[i] ? cells[i] / counts[i] : 0; sum += cells[i]; }
+  const mean = sum / cells.length;
+  let hex = "";
+  for (let i = 0; i < cells.length; i += 4) {
+    let nib = 0;
+    for (let b = 0; b < 4; b++) if (cells[i + b] >= mean) nib |= (1 << (3 - b));
+    hex += nib.toString(16);
+  }
+  return hex;
+}
+/* Hamming distance between two 64-hex fingerprints (0–256). Null unless
+   both are well-formed 64-character hex strings. */
+function hammingDistanceHex(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== 64 || b.length !== 64) return null;
+  let dist = 0;
+  for (let i = 0; i < 64; i++) {
+    const x = parseInt(a[i], 16) ^ parseInt(b[i], 16);
+    if (!Number.isFinite(x)) return null;
+    dist += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
+  }
+  return dist;
+}
+/* Closest earlier history entry whose stored fingerprint is a
+   near-duplicate (Hamming distance ≤ FINGERPRINT_MATCH_BITS). Rows are
+   pg objects from DB.listGradings (detail.fingerprint). Returns
+   { id, cardName, overall, distance, createdAt } or null. HONEST LIMIT:
+   only TEG's own history is searched — resubmissions to other services
+   can never match here. */
+function findFingerprintMatch(rows, fingerprint) {
+  if (typeof fingerprint !== "string" || fingerprint.length !== 64) return null;
+  let best = null;
+  (rows || []).forEach((r) => {
+    if (!r || typeof r !== "object") return;
+    const d = (r.detail && typeof r.detail === "object") ? r.detail : null;
+    const fp = (d && typeof d.fingerprint === "string") ? d.fingerprint : (typeof r.fingerprint === "string" ? r.fingerprint : null);
+    if (!fp || fp.length !== 64) return;
+    const dist = hammingDistanceHex(fingerprint, fp);
+    if (dist === null || dist > FINGERPRINT_MATCH_BITS) return;
+    if (!best || dist < best.distance) best = { id: r.id, cardName: r.cardName || "", overall: (typeof r.overall === "number" ? r.overall : 0), distance: dist, createdAt: r.createdAt || null };
+  });
+  return best;
+}
+/* First-pass print/ink/holo anomaly checks on the straightened (warped)
+   photo, interior only (6% border skipped). texture = Laplacian variance
+   (high-frequency noise — print texture uniformity); ink = coefficient of
+   variation of per-cell mean luminance over an 8×11 grid (ink-density
+   consistency); holo = std dev of luminance among bright (>200) pixels
+   (holo-region reflectivity variance; null when the photo has almost no
+   bright region). Any metric past its first-pass limit flags a WARNING.
+   Returns null for bad input. */
+function analyzePrintAnomaly(p) {
+  if (!p || !p.data || !p.w || !p.h || p.w < 32 || p.h < 32) return null;
+  const w = p.w, h = p.h, d = p.data;
+  const ix0 = Math.floor(w * 0.06), ix1 = Math.ceil(w * 0.94);
+  const iy0 = Math.floor(h * 0.06), iy1 = Math.ceil(h * 0.94);
+  const gray = (x, y) => { const o = (y * w + x) * 4; return 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2]; };
+  const GC = 8, GR = 11;
+  const cellSum = new Array(GC * GR).fill(0), cellN = new Array(GC * GR).fill(0);
+  let n = 0, sum = 0, sum2 = 0;
+  let brightN = 0, brightSum = 0, brightSum2 = 0;
+  for (let y = iy0; y < iy1; y++) {
+    for (let x = ix0; x < ix1; x++) {
+      const g = gray(x, y);
+      const ci = Math.min(GC - 1, Math.floor(((x - ix0) / (ix1 - ix0)) * GC)) + GC * Math.min(GR - 1, Math.floor(((y - iy0) / (iy1 - iy0)) * GR));
+      cellSum[ci] += g; cellN[ci] += 1;
+      if (g > 200) { brightN++; brightSum += g; brightSum2 += g * g; }
+      if (x > ix0 && x < ix1 - 1 && y > iy0 && y < iy1 - 1) {
+        const lap = 4 * g - gray(x - 1, y) - gray(x + 1, y) - gray(x, y - 1) - gray(x, y + 1);
+        n++; sum += lap; sum2 += lap * lap;
+      }
+    }
+  }
+  if (n < 100) return null;
+  const meanLap = sum / n;
+  const texture = Math.max(0, Math.round(sum2 / n - meanLap * meanLap));
+  let cellMeanSum = 0, cellMeanCount = 0;
+  const cellMeans = [];
+  for (let i = 0; i < cellSum.length; i++) {
+    if (!cellN[i]) continue;
+    const m = cellSum[i] / cellN[i];
+    cellMeans.push(m); cellMeanSum += m; cellMeanCount++;
+  }
+  let ink = 0;
+  if (cellMeanCount > 0) {
+    const meanCell = cellMeanSum / cellMeanCount;
+    let vSum = 0;
+    cellMeans.forEach((m) => { vSum += (m - meanCell) * (m - meanCell); });
+    ink = meanCell > 0 ? Math.round((Math.sqrt(vSum / cellMeanCount) / meanCell) * 1000) / 1000 : 0;
+  }
+  let holo = null;
+  if (brightN >= 50) {
+    const meanB = brightSum / brightN;
+    holo = Math.round(Math.sqrt(Math.max(0, brightSum2 / brightN - meanB * meanB)) * 10) / 10;
+  }
+  const notes = [];
+  if (texture > ANOMALY_TEXTURE_MAX) notes.push("print texture uneven (Laplacian variance " + texture + ", first-pass limit " + ANOMALY_TEXTURE_MAX + ")");
+  if (ink > ANOMALY_INK_MAX) notes.push("ink density inconsistent across the card (variation " + ink + ", first-pass limit " + ANOMALY_INK_MAX + ")");
+  if (holo !== null && holo > ANOMALY_HOLO_MAX) notes.push("holo reflectivity varies unusually (spread " + holo + ", first-pass limit " + ANOMALY_HOLO_MAX + ")");
+  return { texture: texture, ink: ink, holo: holo, flagged: notes.length > 0, notes: notes };
+}
+/* All three trust measurements for one analyzed side. p = raw warped
+   photo (before capture enhancement); quadPx = quad corners in original
+   photo pixels; imgW/imgH = original photo size (for the frame-overflow
+   gate). Fingerprint + print checks are FRONT-only by design (the front
+   photo identifies the card); trim is measured per side. */
+function measureTrust(p, quadPx, side, imgW, imgH) {
+  const trim = measureTrim(quadPx, imgW, imgH);
+  if (side === "front") {
+    return { trim: trim, fingerprint: averageHash(p), anomaly: analyzePrintAnomaly(p) };
+  }
+  return { trim: trim, fingerprint: null, anomaly: null };
+}
+/* Hold/trade/sell HINT from real signals only: the grade premium over
+   raw (at-grade value ÷ raw value) and, when available, the Pop Report
+   population at this grade or higher. Returns the hint text or null when
+   the signals do not support one — no hint is shown rather than a
+   guessed one. Never financial advice; the section labels it as such. */
+function marketHintText(overall, raw, atGrade, pop) {
+  if (!(raw > 0) || !(atGrade > 0) || !(overall > 0)) return null;
+  const mult = atGrade / raw;
+  let lean = null;
+  if (overall >= 9.5 && mult >= 2) lean = "High grade with a strong premium over raw — the usual lean is to hold or sell, not trade down.";
+  else if (overall >= 9 && mult >= 1.5) lean = "A solid grade premium over raw — the usual lean is to hold.";
+  else if (mult <= 1.15) lean = "Little premium over raw at this grade — the usual lean is to hold for a better copy or trade, rather than sell at a discount.";
+  if (!lean) return null;
+  if (pop && typeof pop.atOrAbove === "number" && typeof pop.total === "number") {
+    lean += " Population at this grade or higher here: " + pop.atOrAbove + " of " + pop.total + " graded.";
+  }
+  return lean;
+}
+/* Population of this exact card (identityKey) in the loaded history rows:
+   { total, gemMint, atOrAbove } or null when the card has no history yet. */
+function popForCard(rows, det, overall) {
+  if (!rows || !rows.length || !det || !String(det.cardName || "").trim()) return null;
+  let key = null;
+  try { key = identityKey({ cardName: det.cardName, setName: det.setName, year: det.year, cardNumber: det.cardNumber, language: det.language, rarity: det.rarity }); } catch (e) { return null; }
+  let groups = [];
+  try { groups = computePop(rows, ""); } catch (e) { return null; }
+  const g = groups.find((x) => x.key === key);
+  if (!g) return null;
+  let atOrAbove = 0;
+  if (typeof overall === "number") {
+    Object.keys(g.counts || {}).forEach((b) => { const bv = Number(b); if (Number.isFinite(bv) && bv >= overall) atOrAbove += g.counts[b]; });
+  }
+  return { total: g.total, gemMint: g.gemMint, atOrAbove: atOrAbove };
+}
+/* Shared "Trust & Authenticity" section for the report view and the
+   grading result view. o = { trim, fingerprint, anomaly, fingerprintMatch,
+   overall, valueRaw, valueGrade9, valueGrade10, valueAtGrade, pop,
+   showSnapshot }. Missing measurements render as "not available" — old
+   entries predate these checks and are never backfilled by guessing. */
+function trustSectionHtml(o) {
+  const t = (o && typeof o === "object") ? o : {};
+  const trim = (t.trim && typeof t.trim === "object") ? t.trim : null;
+  const anomaly = (t.anomaly && typeof t.anomaly === "object") ? t.anomaly : null;
+  const fp = (typeof t.fingerprint === "string" && t.fingerprint.length === 64) ? t.fingerprint : null;
+  const match = (t.fingerprintMatch && typeof t.fingerprintMatch === "object") ? t.fingerprintMatch : null;
+  const hasPrice = (t.valueRaw > 0) || (t.valueGrade9 > 0) || (t.valueGrade10 > 0) || (t.valueAtGrade > 0);
+  let html = '<section aria-label="Trust and authenticity"><p class="kicker">[ Trust &amp; Authenticity ]</p>' +
+    '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Trust checks — what this report can and cannot prove</h2>' +
+    '<p class="dim" style="margin:0.25rem 0 0.625rem;font-size:13px;line-height:1.65">First-pass photo checks only. They do not authenticate a card, and they never change the grade.</p>';
+  /* Market insights */
+  html += '<article class="slab-frame card" style="border-radius:1rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Market insights</h3>';
+  if (t.showSnapshot) {
+    html += hasPrice
+      ? '<p style="margin-top:0.5rem;font-size:14px;line-height:1.6">Raw ' + fmtIDR(t.valueRaw) + ' · Grade 9 ' + fmtIDR(t.valueGrade9) + ' · Grade 10 ' + fmtIDR(t.valueGrade10) + ' · At grade ' + (typeof t.overall === "number" ? t.overall.toFixed(1) : "—") + ' for you: ' + fmtIDR(t.valueAtGrade) + ".</p>"
+      : '<p class="dim" style="margin-top:0.5rem;font-size:14px;line-height:1.6">No price estimate stored for this card yet.</p>';
+  }
+  html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">No recent sales data available from current sources — the figures above are price estimates, not recorded sales.</p>';
+  const hint = marketHintText(t.overall, t.valueRaw, t.valueAtGrade, t.pop);
+  if (hint) html += '<p style="margin-top:0.375rem;font-size:13.5px;line-height:1.6"><strong>Hint:</strong> ' + esc(hint) + ' This is a hint, not financial advice.</p>';
+  html += "</article>";
+  /* Trim detection */
+  html += '<article class="slab-frame card" style="border-radius:1rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Trim detection</h3>';
+  if (trim) {
+    if (trim.notMeasurable) {
+      html += '<p class="dim" style="margin-top:0.5rem;font-size:13.5px;line-height:1.6">Trim check not measurable for this photo — the card fills the frame, so its full outline is not visible. Retake with the whole card inside the frame.</p>';
+    } else if (trim.flagged) {
+      html += '<p role="alert" style="margin-top:0.5rem;border:1px solid #cf5138;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem;font-size:13.5px;line-height:1.6;color:#e0684f"><strong>Possible trimming flagged.</strong> Measured ratio ' + trim.ratio + ' vs standard ' + trim.expectedRatio + ' (63 × 88 mm), deviation ' + Math.round(trim.deviation * 1000) / 10 + '%. Measured size ≈ ' + trim.measuredWidthMm + ' × ' + trim.measuredHeightMm + ' mm if the long side is untrimmed.' + (trim.edgeResidual > TRIM_EDGE_TOL ? " Opposite edges differ by " + Math.round(trim.edgeResidual * 1000) / 10 + "%." : "") + ' Inspect the edges in person — this is a first-pass photo check, not proof of trimming.</p>';
+    } else {
+      html += '<p style="margin-top:0.5rem;font-size:13.5px;line-height:1.6"><span style="font-weight:700;color:#0e9f6e">No trimming flagged.</span> <span class="dim">Measured ratio ' + trim.ratio + ' vs standard ' + trim.expectedRatio + ' (deviation ' + Math.round(trim.deviation * 1000) / 10 + '%), opposite edges match within ' + Math.round(trim.edgeResidual * 1000) / 10 + '%.</span></p>';
+    }
+  } else {
+    html += '<p class="dim" style="margin-top:0.5rem;font-size:13.5px;line-height:1.6">Trim check not available for this entry.</p>';
+  }
+  html += "</article>";
+  /* Digital fingerprint */
+  html += '<article class="slab-frame card" style="border-radius:1rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Digital fingerprint</h3>';
+  if (fp) {
+    html += '<p style="margin-top:0.5rem;font-size:13.5px;line-height:1.6">Fingerprint <code style="font-size:12px">' + esc(fp.slice(0, 16)) + '…</code> <span class="dim">— a 64-character hash of the straightened front photo, recorded at grading.</span></p>';
+    if (match) {
+      html += '<p role="alert" style="margin-top:0.5rem;border:1px solid #c96a27;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem;font-size:13.5px;line-height:1.6;color:#e8a34c"><strong>This card appears to have been graded before</strong> — see the <a href="?report=' + esc(String(match.id)) + '" style="color:#f0d79a">earlier grading</a>' + (match.cardName ? " (" + esc(match.cardName) + (match.overall > 0 ? ", grade " + match.overall : "") + ")" : "") + ", fingerprint distance " + match.distance + " of 256 bits. Matching only covers cards graded here.</p>";
+    } else {
+      html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">No earlier grading with a matching fingerprint was found in TEG history.</p>';
+    }
+  } else {
+    html += '<p class="dim" style="margin-top:0.5rem;font-size:13.5px;line-height:1.6">Digital fingerprint not available for this entry.</p>';
+  }
+  html += "</article>";
+  /* Print / ink / holo anomaly */
+  html += '<article class="slab-frame card" style="border-radius:1rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Print, ink &amp; holo check</h3>';
+  if (anomaly) {
+    if (anomaly.flagged) {
+      html += '<p role="alert" style="margin-top:0.5rem;border:1px solid #c96a27;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem;font-size:13.5px;line-height:1.6;color:#e8a34c"><strong>Unusual texture detected — inspect manually.</strong> ' + esc((anomaly.notes || []).join("; ")) + " This is a first-pass warning, not a verdict on authenticity.</p>";
+    } else {
+      html += '<p style="margin-top:0.5rem;font-size:13.5px;line-height:1.6"><span style="font-weight:700;color:#0e9f6e">No anomalies detected</span> <span class="dim">in the first-pass print, ink, and holo checks.</span></p>';
+    }
+  } else {
+    html += '<p class="dim" style="margin-top:0.5rem;font-size:13.5px;line-height:1.6">Print check not available for this entry.</p>';
+  }
+  html += "</article>";
+  html += '<p class="dim" style="margin-top:0.625rem;font-size:12px;line-height:1.65">Fingerprint matching only covers cards graded here — it cannot detect resubmissions to other services. Trim and print checks read photo pixels only; a physical inspection can still disagree.</p></section>';
+  return html;
 }
 function fallbackAnalysis(reason) {
   /* R2: kegagalan total BUKAN NM 7 yang percaya diri — semua subgrade
@@ -4437,6 +4758,7 @@ const state = {
   det: null,
   values: { raw: 0, g9: 0, g10: 0, atGrade: 0 },
   analysis: null,
+  fingerprintMatch: null, /* v27.4: earlier history entry with a matching fingerprint, or null */
   savedId: null,
   /* K2: draf lokal hasil analisis — persist hanya lewat confirmAndSaveDraft. */
   draftPayload: null,
@@ -6565,6 +6887,13 @@ function buildSavePayload(d, a, v, f, b, opts) {
       /* R16h: sisi yang tidak terukur ikut tersimpan agar Riwayat/Laporan
          tetap mencatatnya setelah reload (sebelumnya hanya di memori). */
       unmeasuredSides: (a && a.unmeasuredSides) || null,
+      /* v27.4: first-pass trust checks (photo measurements only, no
+         grading impact). Stored in detail JSONB — no schema change.
+         Old entries have none of these fields (never backfilled). */
+      trim: (a && a.trust && a.trust.trim) || null,
+      fingerprint: (a && a.trust && a.trust.fingerprint) || null,
+      anomaly: (a && a.trust && a.trust.anomaly) || null,
+      fingerprintMatch: state.fingerprintMatch || null,
       /* K2/E12: label koreksi — baris ini menggantikan (supersedes) baris
          lama; baris lama tetap ada (RLS) dan tetap dihitung Pop. */
       correction: (opts && opts.isCorrection) ? { isCorrection: true, supersedesId: opts.supersedesId != null ? String(opts.supersedesId) : null, correctedAt: new Date().toISOString() } : null,
@@ -6776,6 +7105,18 @@ async function runAnalysis(isSample) {
   state.det = detection;
   state.values = vals;
   state.analysis = combined;
+  /* v27.4: fingerprint resubmission check — compare the new card's
+     fingerprint with fingerprints already stored in TEG history (this
+     history only). Runs before the draft is built so the match is stored
+     with it; a missing/unloaded history means no match, never a guess. */
+  state.fingerprintMatch = null;
+  try {
+    const fp = combined && combined.trust ? combined.trust.fingerprint : null;
+    if (fp) {
+      if (!state.allRows || state.allRows.length === 0) { try { state.allRows = await DB.listGradings(200); } catch (e2) { /* history unavailable — no match check */ } }
+      state.fingerprintMatch = findFingerprintMatch(state.allRows || [], fp);
+    }
+  } catch (e) { state.fingerprintMatch = null; }
   state.enhance = { front: fa ? fa.enhance : null, back: ba ? ba.enhance : null };
   state.quadChallenge = { front: fa ? fa.quadChallenge : null, back: ba ? ba.quadChallenge : null };
   state.enhanceView = "after";
@@ -7221,6 +7562,8 @@ function renderResultHtml() {
      bila ada — dulu hilang bila raw = 0. */
   if (det.basis) html += '<p class="dim" style="margin-top:0.25rem;text-align:center;font-size:12px">' + esc(det.basis) + "</p>";
   html += '<p class="dim" style="margin-top:0.5rem;text-align:center;font-size:12px">Rough estimate from market &amp; photos — not an official appraisal.</p></div>';
+  /* v27.4 · Trust & Authenticity (first-pass checks — never change the grade). */
+  html += trustSectionHtml({ trim: (a.trust && a.trust.trim) || null, fingerprint: (a.trust && a.trust.fingerprint) || null, anomaly: (a.trust && a.trust.anomaly) || null, fingerprintMatch: state.fingerprintMatch || null, overall: a.overall, valueRaw: values.raw, valueGrade9: values.g9, valueGrade10: values.g10, valueAtGrade: displayValueAtGrade(a.overall, values), pop: popForCard(state.allRows || [], det, a.overall), showSnapshot: false });
   html += '<button type="button" data-action="reset-grading" class="btn-gold fd" style="width:100%;border-radius:0.75rem;padding:0.875rem 1rem;font-size:18px;font-weight:700;min-height:3.25rem">Grade another card</button>';
   html += "</div>";
   return html;
@@ -7426,6 +7769,14 @@ function renderStandards() {
       '<p class="dim" style="display:flex;align-items:center;padding:0.75rem 0.875rem;font-size:14px;line-height:1.6;margin:0">' + esc(row[2]) + "</p></div>"
     ).join("") + "</div></div>";
   html += '<p class="dim" style="margin-top:1.25rem;border:1px dashed var(--border);border-radius:0.75rem;padding:0.75rem 1rem;font-size:13px;line-height:1.65"><strong style="color:var(--text)">Honest limits:</strong> this analysis reads photos, it does not hold the card. Very fine scratches, texture felt only by touch, and defects under light reflections may not be caught by the camera. That is why every result is labeled Digital Grading / Estimated, and photos that meet the Photo Standard give the most defensible results.</p>';
+  html += '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="margin-top:1rem;border-radius:1rem"><h3 class="fc" style="font-size:15px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase">Trust &amp; Authenticity</h3>' +
+    '<p class="dim" style="margin-top:0.25rem;font-size:14px;line-height:1.65">Four first-pass photo checks, shown in every report. None of them changes the grade.</p>' +
+    '<ul style="list-style:none;margin:0.625rem 0 0;padding:0" class="stack">' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Market insights</strong> — the price snapshot already stored for the card (raw / grade 9 / grade 10 / at grade) plus a hold/trade/sell hint from the grade premium over raw and, where available, the Pop Report population. No recent sales data is shown, because the current sources do not provide any — the report says so plainly instead of inventing a sales list.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Trim detection</strong> — the detected card outline is measured against the 63 × 88 mm standard (width/height ratio 0.7159). A large deviation (over 12%) on a near-frontal photo (opposite edges within 6%) flags the card for a manual edge inspection, and the measured size is shown when flagged. Honest limit: a small trim (a few millimetres) is below the measurement noise of a handheld phone photo — clean corpus photos deviate up to ~9% from perspective alone — so a clean result does not prove the card is untrimmed. When the card fills the frame, its full outline is not visible and the check is not measurable.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Digital fingerprint</strong> — a 64-character average hash of the straightened front photo, recorded at grading. A new grading whose hash is within 5 of 256 bits of an earlier entry is flagged as "appears to have been graded before", with a link to that entry. Matching only covers cards graded here — it cannot detect resubmissions to other services. Entries graded before this check have no fingerprint.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Print, ink &amp; holo check</strong> — first-pass texture checks on the straightened photo (print-texture uniformity, ink-density consistency, holo reflectivity variance). A flag is a warning to inspect manually, never a "fake" verdict; a clean result says "no anomalies detected", never "authentic".</span></li>' +
+    "</ul></article>";
   html += "</section>";
   return html;
 }
@@ -7770,6 +8121,8 @@ async function renderReport(id) {
     }
     html += "</section>";
     html += gradeBreakdownHtml(pg, detail, findings, allMarkers);
+    /* v27.4 · Trust & Authenticity (first-pass checks — never change the grade). */
+    html += trustSectionHtml({ trim: detail.trim || null, fingerprint: detail.fingerprint || null, anomaly: detail.anomaly || null, fingerprintMatch: detail.fingerprintMatch || null, overall: pg.overall, valueRaw: pg.valueRaw, valueGrade9: pg.valueGrade9, valueGrade10: pg.valueGrade10, valueAtGrade: pg.valueAtGrade, pop: null, showSnapshot: true });
     /* Bukti foto */
     const side = state.reportSide === "back" && pg.backUrl ? "back" : "front";
     const sideUrl = side === "front" ? pg.frontUrl : pg.backUrl;
