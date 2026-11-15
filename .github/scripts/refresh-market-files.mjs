@@ -1,9 +1,14 @@
 // refresh-market-files.mjs — TEG v27.7 Fase 1b (job harian, GitHub Actions)
 // ---------------------------------------------------------------------------
 // What this does (see design spec §5.5) — TCGCSV-ONLY in this round:
-//   1. Downloads the TCGCSV daily file (the Cardmarket price-guide step
-//      is DEFERRED — user decision 2026-11-16 01:30 WIB, follow-up round,
-//      NOT this round; see CARDMARKET_ENABLED below).
+//   1. Downloads the TCGCSV per-group PRICES file (TCGCSV_URL, must end
+//      in "/prices") AND the matching PRODUCTS file (same URL with
+//      "/prices" -> "/products") and JOINS them on productId — the
+//      prices file carries NO groupId/name/number, the products file
+//      carries them (verified 2026-11-16 on group 23286, Paradox Rift;
+//      see the TCGCSV_URL comment below). The Cardmarket price-guide
+//      step is DEFERRED — user decision 2026-11-16 01:30 WIB,
+//      follow-up round, NOT this round; see CARDMARKET_ENABLED below.
 //   2. Reads the mapped sets/groups from Supabase table `tcg_set_map`.
 //   3. Imports ONLY products from mapped groups into `tcgplayer_prices`
 //      (never the whole file — Supabase free tier is 500 MB).
@@ -11,13 +16,21 @@
 //      `category|name|set|number`) — that is the column the
 //      `market-prices` Edge Function looks up with
 //      `.eq("card_key", cardKey)`, so without it the TCGCSV source stays
-//      `not_available`. TCGCSV builds it from the file's product name +
-//      the mapped group; a row whose format carries no usable
-//      name/number is still upserted, but WITHOUT card_key (NULL) + an
-//      explicit warning — it stays `not_available` until the mapping
-//      exists. card_key collisions (e.g. two printings, same
-//      name+set+number) are deduped, first row wins, because card_key is
-//      UNIQUE per table and the Edge Function uses `.maybeSingle()`.
+//      `not_available`. The job builds it from the PRODUCTS file's
+//      product name (trailing " - NNN/NNN" suffix stripped — verified
+//      on all 266 numbered products of group 23286) + the card number
+//      from extendedData ("Number" -> "Card Number", e.g. "001/182")
+//      + the mapped group (group -> category + teg_set via tcg_set_map).
+//      A row whose product carries no usable name/number (e.g. sealed
+//      product: ETB, booster bundle) is still upserted, but WITHOUT
+//      card_key (NULL) + an explicit warning — it stays `not_available`
+//      until the mapping exists. card_key collisions (e.g. two printings,
+//      same name+set+number) are deduped, first row wins, because
+//      card_key is UNIQUE per table and the Edge Function uses
+//      `.maybeSingle()`. NOTE: one product can have several prices rows
+//      (subTypeName: Normal / Reverse Holofoil / Holofoil) — the first
+//      row wins, so the winning subType follows the file order; a later
+//      round could prefer Normal explicitly.
 //   4. Refreshes `fx_rates` from exchangerate-api.com (old values are kept
 //      when that fetch fails).
 //
@@ -34,7 +47,11 @@
 // Node 20, zero dependencies (global fetch only). Run with:
 //   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... node refresh-market-files.mjs
 // Optional env:
-//   TCGCSV_URL               — daily TCGCSV file URL (see VERIFY_AT_BUILD below)
+//   TCGCSV_URL               — per-group PRICES file URL, must end in
+//                              "/prices" (e.g. .../tcgplayer/3/23286/prices);
+//                              the products URL is derived from it. Formats
+//                              verified 2026-11-16 — see the TCGCSV comment
+//                              above the TCGCSV_URL constant.
 //   CARDMARKET_ENABLED=true  — DEFERRED: re-enables the Cardmarket step in a
 //                              follow-up round (default off; do NOT enable
 //                              yet — user decision 2026-11-16 01:30 WIB)
@@ -69,15 +86,34 @@ const CARDMARKET_ENABLED = process.env.CARDMARKET_ENABLED === "true";
 const CARDMARKET_PRICE_GUIDE_URL =
   "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_1.json";
 
-// TCGCSV daily file — VERIFY_AT_BUILD.
-// Spec §2.8 confirms only that TCGCSV (https://tcgcsv.com/, see its FAQ)
-// publishes a DAILY dump (CSV/JSON) of TCGplayer prices, updated ~20:00 UTC,
-// and that it must be consumed server-side, once a day. The spec does NOT
-// give the exact per-file download URL, so NO URL is hardcoded here.
-// Set TCGCSV_URL (env var, or the workflow_dispatch `tcgcsv_url` input) to
-// the exact file URL from https://tcgcsv.com/faq before the first run.
-// Until then this step logs a warning and is SKIPPED — it never guesses a
-// URL and never fails the job.
+// TCGCSV per-group files — formats VERIFIED 2026-11-16 on group 23286
+// ("SV04: Paradox Rift", TCGplayer group id 23286, from TCGCSV's own
+// group list). Set TCGCSV_URL (env var, or the workflow_dispatch
+// `tcgcsv_url` input) to the PRICES file URL, which MUST end in
+// "/prices" — the products URL is derived from it by replacing that
+// trailing "/prices" with "/products". No URL is hardcoded here.
+//   Prices file:  https://tcgcsv.com/tcgplayer/3/23286/prices
+//     -> {"success":true,"errors":[],"results":[
+//          {"productId":523584,"lowPrice":...,"midPrice":...,
+//           "highPrice":...,"marketPrice":...,"directLowPrice":null,
+//           "subTypeName":"Normal"}]}  (469 rows for group 23286)
+//     NOTE: the prices file carries NO groupId, NO name, NO number —
+//     it cannot be keyed on its own.
+//   Products file: https://tcgcsv.com/tcgplayer/3/23286/products
+//     -> {"totalItems":309,"success":true,"errors":[],"results":[
+//          {"productId":523584,"name":"Surskit","cleanName":"Surskit",
+//           "groupId":23286,
+//           "extendedData":[{"name":"Number","displayName":"Card Number",
+//                            "value":"001/182"}, ...]}]}  (309 items;
+//     266 carry a Number — the cards; the other 43 are sealed products
+//     with no Number and get no card_key, by design.)
+//     NOTE: a card's `name` is the plain card name OR the card name
+//     plus a trailing " - NNN/NNN" suffix (147 of the 266 numbered
+//     products, e.g. "Froslass ex - 003/182"); stripping that suffix
+//     was verified to equal cleanName-minus-number on ALL 266.
+//   The job downloads BOTH files and joins them on productId; without
+//   the products file there is no name/number/group to filter or key by,
+//   so the step is skipped (never guessed, never whole-file).
 const TCGCSV_URL = process.env.TCGCSV_URL || "";
 const TCGCSV_URL_IS_PLACEHOLDER = TCGCSV_URL.trim() === "";
 
@@ -446,12 +482,59 @@ async function refreshCardmarket(setMap) {
   log(`Cardmarket: ${summary.cardmarket}`);
 }
 
-// --- Step 3: TCGCSV daily file ----------------------------------------------
+// --- Step 3: TCGCSV per-group files (prices + products, joined) --------
+// VERIFIED 2026-11-16 on group 23286 (Paradox Rift):
+//   prices file   -> {results:[{productId, lowPrice, midPrice, highPrice,
+//                    marketPrice, directLowPrice, subTypeName}]} —
+//                    NO groupId, NO name, NO number.
+//   products file -> {results:[{productId, name, cleanName, groupId,
+//                    extendedData:[{name:"Number", value:"001/182"}]}]}
+// The step downloads BOTH (products URL = TCGCSV_URL with trailing
+// "/prices" replaced by "/products") and joins on productId. Without
+// the products file there is no group to filter by and no name/number
+// to build card_key with, so the step is skipped — never guessed, never
+// whole-file. The products file is group-scoped, so every entry in it
+// already belongs to one group; the mapped-groups filter still applies
+// per entry (a URL for an unmapped group imports nothing).
+
+// Card name as TCGCSV prints it: the plain card name, or the card name
+// plus a trailing " - NNN/NNN" suffix (e.g. "Froslass ex - 003/182").
+// Stripping that suffix was verified on ALL 266 numbered products of
+// group 23286 to equal cleanName with the number tokens removed
+// (0 mismatches), so the cleaned name is exactly the card name the
+// Edge Function receives from grading input — the card_key built from
+// it matches logic.ts buildCardKey for the same card.
+function tcgcsvCardName(rawName) {
+  if (typeof rawName !== "string") return undefined;
+  const cleaned = rawName.replace(/\s*-\s*\d+\/\d+\s*$/, "").trim();
+  return cleaned === "" ? undefined : cleaned;
+}
+
+// Card number from a TCGCSV products entry: extendedData holds it as
+// {"name":"Number","displayName":"Card Number","value":"001/182"}.
+// (A top-level number field does not exist in the verified format;
+// the pick() fallback covers it if a future file adds one.)
+function tcgcsvCardNumber(product) {
+  const ext = product?.extendedData;
+  if (Array.isArray(ext)) {
+    for (const d of ext) {
+      if (
+        d && (d.name === "Number" || d.name === "Card Number") &&
+        d.value !== undefined && d.value !== null &&
+        String(d.value).trim() !== ""
+      ) {
+        return String(d.value);
+      }
+    }
+  }
+  const top = pick(product, "number", "cardNumber", "numberInSet", "card_number");
+  return top === undefined ? undefined : String(top);
+}
 
 async function refreshTcgcsv(setMap) {
   if (TCGCSV_URL_IS_PLACEHOLDER) {
-    warn("TCGCSV: VERIFY_AT_BUILD — no TCGCSV_URL set. The exact daily-file URL was not pinned by spec §2.8; set TCGCSV_URL (env, or workflow_dispatch `tcgcsv_url`) to the file URL from https://tcgcsv.com/faq, then re-run. Skipping TCGCSV step.");
-    summary.tcgcsv = "skipped: VERIFY_AT_BUILD (no TCGCSV_URL)";
+    warn("TCGCSV: no TCGCSV_URL set. Set it (env, or workflow_dispatch `tcgcsv_url`) to the per-group PRICES file URL, e.g. https://tcgcsv.com/tcgplayer/3/23286/prices — the products file URL is derived from it. Skipping TCGCSV step.");
+    summary.tcgcsv = "skipped: no TCGCSV_URL";
     return;
   }
   const mappedGroups = new Set([...setMap.tcgcsvGroupIds, ...setMap.tcgplayerGroupIds]);
@@ -460,20 +543,53 @@ async function refreshTcgcsv(setMap) {
     summary.tcgcsv = "skipped: no mapped groups";
     return;
   }
-  const text = await fetchText(TCGCSV_URL, "TCGCSV");
-  log(`TCGCSV: downloaded ${(text.length / 1_048_576).toFixed(1)} MB`);
-  const trimmed = text.trimStart();
-  let entries;
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    entries = jsonArray(text, "TCGCSV");
-  } else {
-    entries = parseCsv(text);
+  if (!TCGCSV_URL.endsWith("/prices")) {
+    warn("TCGCSV: TCGCSV_URL must end with /prices (per-group prices file, e.g. .../tcgplayer/3/23286/prices) so the products file URL can be derived from it (.../products). Skipping TCGCSV step — the URL is not guessed.");
+    summary.tcgcsv = "skipped: TCGCSV_URL is not a per-group prices URL";
+    return;
   }
+  const productsUrl = TCGCSV_URL.slice(0, -"/prices".length) + "/products";
+  const priceText = await fetchText(TCGCSV_URL, "TCGCSV prices");
+  log(`TCGCSV: downloaded prices ${(priceText.length / 1_048_576).toFixed(2)} MB`);
+  let prodText;
+  try {
+    prodText = await fetchText(productsUrl, "TCGCSV products");
+  } catch (e) {
+    warn(`TCGCSV: products file failed (${e.message}) — the prices file carries no groupId/name/number, so no row can be filtered or keyed without the join. Skipping TCGCSV step; yesterday's tcgplayer_prices stay in use.`);
+    summary.tcgcsv = "skipped: products file failed, join impossible";
+    return;
+  }
+  log(`TCGCSV: downloaded products ${(prodText.length / 1_048_576).toFixed(2)} MB`);
+  const priceEntries = jsonArray(priceText, "TCGCSV prices");
+  const prodEntries = jsonArray(prodText, "TCGCSV products");
+
+  // Join map: productId -> { groupId, name, number } from the products file.
+  const productInfo = new Map();
+  let productsWithGroup = 0, productsWithName = 0, productsWithNumber = 0;
+  for (const p of prodEntries) {
+    const pid = toNumber(pick(p, "productId", "product_id", "productID", "id"));
+    if (pid === undefined) continue;
+    const groupId = toNumber(pick(p, "groupId", "group_id", "groupID"));
+    const rawName = pick(p, "name", "cleanName", "productName", "product_name");
+    const number = tcgcsvCardNumber(p);
+    if (groupId !== undefined) productsWithGroup++;
+    if (typeof rawName === "string" && rawName.trim() !== "") productsWithName++;
+    if (number !== undefined && String(number).trim() !== "") productsWithNumber++;
+    productInfo.set(pid, { groupId, name: rawName, number });
+  }
+  log(`TCGCSV: products join map has ${productInfo.size} products (${productsWithGroup} with group id, ${productsWithName} with name, ${productsWithNumber} with number)`);
+  if (productsWithGroup === 0) {
+    // No entry carried a group id — cannot filter to mapped groups, so
+    // NOTHING is imported (whole-file import is forbidden, spec §5.3).
+    warn("TCGCSV: NO products entry carried a group id — cannot filter to mapped groups, so NOTHING was imported (whole-file import is forbidden, spec §5.3). Check the products file format against https://tcgcsv.com/faq and adjust the field mapping.");
+    summary.tcgcsv = "skipped: no group info to filter by";
+    return;
+  }
+
   const rows = [];
-  let skippedUnmapped = 0, skippedNoPrice = 0, skippedNoGroup = 0, skippedNoCardKey = 0;
-  for (const e of entries) {
+  let skippedUnmapped = 0, skippedNoPrice = 0, skippedNoGroup = 0, skippedNoProduct = 0, skippedNoCardKey = 0;
+  for (const e of priceEntries) {
     const productId = toNumber(pick(e, "productId", "product_id", "productID", "id"));
-    const groupId = toNumber(pick(e, "groupId", "group_id", "groupID"));
     const market = toNumber(pick(e, "marketPrice", "market", "market_price"));
     const low = toNumber(pick(e, "lowPrice", "low", "low_price"));
     const mid = toNumber(pick(e, "midPrice", "mid", "mid_price"));
@@ -482,45 +598,41 @@ async function refreshTcgcsv(setMap) {
       skippedNoPrice++;
       continue;
     }
+    // Join: name/number/group come from the products file, never from
+    // the prices file (it carries none of them).
+    const info = productInfo.get(productId);
+    if (info === undefined) { skippedNoProduct++; continue; }
+    const groupId = info.groupId;
     if (groupId === undefined) { skippedNoGroup++; continue; }
     if (!mappedGroups.has(groupId)) { skippedUnmapped++; continue; }
-    // card_key (spec §5.2 step 1) from the file's product name + the
-    // mapped group (group -> category + teg_set via tcg_set_map).
-    // VERIFY_AT_BUILD: spec §2.8 only confirms the file carries prices
-    // per printing joined via productId — it does NOT confirm the file
-    // carries product names/numbers. The picks below are the common
-    // variants; if the first run shows "without card-key data" for every
-    // row, the file has no name/number and a products-file join (or a
-    // name lookup) must be added before this source can answer lookups.
-    // Unlike Cardmarket, the row is STILL upserted — but WITHOUT card_key
-    // (the property is omitted from the payload, so PostgREST
-    // merge-duplicates leaves any existing key untouched on conflict and
-    // new rows get NULL). A NULL-card_key row is stored but invisible to
-    // the Edge Function's .eq("card_key", ...) lookup. Never invent one.
+    // card_key (spec §5.2 step 1) — the Edge Function looks rows up by
+    // this key, so a row without it is invisible to the API. Name is
+    // the products file's name with the trailing " - NNN/NNN" suffix
+    // stripped (tcgcsvCardName, verified on group 23286); number is the
+    // extendedData "Number" (e.g. "001/182"); set/category come from
+    // tcg_set_map via the group id. If any part is missing the row is
+    // STILL upserted — but WITHOUT card_key (the property is omitted
+    // from the payload, so PostgREST merge-duplicates leaves any
+    // existing key untouched on conflict and new rows get NULL). A
+    // NULL-card_key row is stored but invisible to the Edge Function's
+    // .eq("card_key", ...) lookup. Never invent one.
     const setEntry = setMap.tcgcsvGroupMap.get(groupId);
-    const name = pick(e, "name", "productName", "product_name", "cleanName");
-    const number = pick(e, "number", "cardNumber", "numberInSet", "card_number");
-    const cardKey = buildCardKey(setEntry?.category, name, setEntry?.tegSet, number);
+    const cardKey = buildCardKey(setEntry?.category, tcgcsvCardName(info.name), setEntry?.tegSet, info.number);
     const row = { product_id: productId, market: market ?? null, low: low ?? null, mid: mid ?? null, high: high ?? null, updated: todayISO() };
     if (cardKey === null) { skippedNoCardKey++; }
     else row.card_key = cardKey;
     rows.push(row);
   }
-  log(`TCGCSV: ${entries.length} entries scanned, ${rows.length} mapped, ${skippedUnmapped} unmapped skipped, ${skippedNoGroup} without group id skipped, ${skippedNoCardKey} without card-key data (stored without card_key), ${skippedNoPrice} unreadable skipped`);
-  if (skippedNoGroup === entries.length) {
-    warn("TCGCSV: NO entry carried a group id — cannot filter to mapped groups, so NOTHING was imported (whole-file import is forbidden, spec §5.3). Check the file format against https://tcgcsv.com/faq and adjust the field mapping.");
-    summary.tcgcsv = "skipped: no group info to filter by";
-    return;
-  }
+  log(`TCGCSV: ${priceEntries.length} prices entries scanned, ${prodEntries.length} products in join map, ${rows.length} mapped, ${skippedUnmapped} unmapped skipped, ${skippedNoGroup} without group id skipped, ${skippedNoProduct} prices rows with no products entry skipped, ${skippedNoCardKey} without card-key data (stored without card_key), ${skippedNoPrice} unreadable skipped`);
   if (skippedNoCardKey > 0) {
-    warn(`TCGCSV: ${skippedNoCardKey} row(s) stored WITHOUT card_key (NULL) — the file format carried no usable product name/number to build the §5.2 step 1 key. Those rows stay not_available in the Edge Function until the format is verified to carry name + number (or a products-file join is added). Prices are still stored under product_id for reference; only the per-card lookup is blind to them.`);
+    warn(`TCGCSV: ${skippedNoCardKey} row(s) stored WITHOUT card_key (NULL) — the product carried no usable name/number to build the §5.2 step 1 key (sealed products have no Number). Those rows stay not_available in the Edge Function until the format supplies name + number — prices are still stored under product_id for reference; only the per-card lookup is blind to them.`);
   }
   const deduped = dedupeByCardKey(rows);
   if (deduped.collisions > 0) {
-    warn(`TCGCSV: ${deduped.collisions} card_key collision(s) — two products share one name+set+number; first row kept, the rest dropped (card_key is UNIQUE per table; the Edge Function uses .maybeSingle()).`);
+    warn(`TCGCSV: ${deduped.collisions} card_key collision(s) — two rows share one key (a product with several subType prices: Normal / Reverse Holofoil / Holofoil); first row wins, the rest dropped (card_key is UNIQUE per table; the Edge Function uses .maybeSingle()).`);
   }
   const written = await sbUpsert("tcgplayer_prices", deduped.rows);
-  summary.tcgcsv = `upserted ${written} rows (of ${entries.length} scanned)`;
+  summary.tcgcsv = `upserted ${written} rows (of ${priceEntries.length} prices entries scanned)`;
   log(`TCGCSV: ${summary.tcgcsv}`);
 }
 

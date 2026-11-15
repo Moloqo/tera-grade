@@ -72,6 +72,6 @@ jobs:
           # file URL). Empty on schedule runs until the owner sets it here
           # or via the workflow_dispatch input; the script skips the
           # TCGCSV step with a warning when it is empty.
-          TCGCSV_URL: ${{ inputs.tcgcsv_url }}
+          TCGCSV_URL: ${{ inputs.tcgcsv_url || vars.TCGCSV_URL }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: node .github/scripts/refresh-market-files.mjs
