@@ -1298,7 +1298,13 @@ function findCardBounds(p) {
         bukan tepi luar sejati (kontras rendah DAN latar luar tidak
         seragam DAN tidak menempel bingkai foto) hukumannya dikali 0,78.
         Bila satu kandidat memuat kandidat lain yang nilainya bersaing,
-        yang LUAR yang menang — batas kartu adalah batas terluar.
+        pemenangnya ditentukan aturan bersarang dua arah di
+        detectCardBoundary: kandidat DALAM menang hanya bila pita
+        bordernya jauh lebih solid (+0,18) dan skornya bersaing —
+        itu perlindungan kartu di dalam sleeve; kandidat LUAR menang
+        bila bukti border dan skornya setara — itu perlindungan dari
+        garis aus di dalam kartu yang meniru tepi. Bukan "yang luar
+        selalu menang".
      4) PENGHALUSAN SUDUT: tiap sisi dicari ulang sebagai GARIS — di
         sepanjang sisi diambil puncak gradien dalam radius ±7 px, garis
         dipasang total-least-squares dengan penolakan outlier, lalu
@@ -2641,6 +2647,10 @@ function detectCardBoundary(p, opts) {
       }
     }
     if (!best) return fail(15);
+    /* Invarian kalibrasi (v27.1h): gerbang challenger Opsi A (median < 90,
+       cap geser ≤ 25 px) dan ambang aturan bersarang ini dikalibrasi untuk
+       p0 maxDim = 720 (lihat loadPixels). Bila maxDim berubah, kalibrasi
+       ulang kedua gerbang ini wajib. */
     /* Pemilihan bersarang berbasis bukti pita border tercetak.
        Dua arah, karena dua kegagalan nyata berlawanan:
        - DALAM menang (kartu di dalam sleeve/toploader): kandidat yang
@@ -2663,8 +2673,11 @@ function detectCardBoundary(p, opts) {
         const aC = quadAreaPx(cand.quad), aB = quadAreaPx(best.quad);
         if (aC <= aB * 0.97 && quadContains(best.quad, cand.quad, 0.02)) {
           const bIn = cand.sc.borderScore || 0, bOut = best.sc.borderScore || 0;
-          if ((bIn >= bOut + 0.18 && aC >= aB * 0.55 && cand.sc.score >= best.sc.score - 0.22) ||
-              (bIn >= bOut + 0.08 && aC >= aB * 0.72 && cand.sc.score >= best.sc.score - 0.18)) { best = cand; switched = true; }
+          // v27.1h (N1 inner-strict): DALAM-menang hanya lewat klausa A (+0,18 border).
+          // Klausa B (+0,08) dihapus: ia memveto quad benar di foto gelap,
+          // sementara klausa A tidak pernah menyala dalam 35 switch yang teramati
+          // (investigasi nested-selection, 2026-11-15). Cabang LUAR di bawah tidak berubah.
+          if (bIn >= bOut + 0.18 && aC >= aB * 0.55 && cand.sc.score >= best.sc.score - 0.22) { best = cand; switched = true; }
         } else if (aC >= aB * 1.05 && aC <= aB * 1.35 && quadContains(cand.quad, best.quad, 0.035)) {
           /* Varian sintetis (pelengkap rasio / tumbuh) tidak boleh
              merebut kemenangan lewat aturan luar-menang: mereka memang
