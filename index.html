@@ -761,7 +761,7 @@ const SUBGRADE_STANDARDS = [
     id: "centering", name: "Centering",
     short: "Balance of border width left–right and top–bottom.",
     measured: "Border width ratio on both axes (e.g. 55/45), measured from photo pixels.",
-    method: "Five parallel lines per side (center line + ±8% and ±16%) trace the color transition between the outer border band and the card face, with an adaptive threshold from each line's local contrast (0.35× contrast, capped at 30–60); transition points are interpolated sub-pixel. Each line is validated first: the crossing must be found (not a fallback), its color step sharp and sustained (median color distance 5 px after the crossing stays above threshold, samples before the crossing below threshold, rise complete within ≤ 2 px), and its width plausible (< 25% of line length). Border width per side comes from clusters of valid line widths: split a cluster when the gap is > 4 px. A valid center line uses itself when it agrees with the nearest cluster median (gap ≤ max 6 px or 35% of median), otherwise it uses that cluster median; an invalid center line uses the nearest cluster median from its center width, and when no cluster is within 12 px, uses the smallest cluster. When the center line is suspected of reading an interior band (its width far above the other lines), its profile is rescanned with a low threshold that still requires a sustained step. A side is marked Estimated when the chosen cluster holds fewer than 2 lines or the spread of valid lines is above 8 px. Measurement confidence is computed from the spread of valid lines only, then multiplied by the card-boundary (quad) detection confidence — combined confidence below 55%, a very thin measured border (< 6 px), disagreeing lines, or too small a straightening result makes that side Estimated. The score follows the most shifted axis; front and back are compared — the more shifted side decides, unless that side is Estimated.",
+    method: "Five parallel lines per side (center line + ±8% and ±16%) trace the color transition between the outer border band and the card face, with an adaptive threshold from each line's local contrast (0.35× contrast, capped at 30–60); transition points are interpolated sub-pixel. Each line is validated first: the crossing must be found (not a fallback), its color step sharp and sustained (median color distance 5 px after the crossing stays above threshold, samples before the crossing below threshold, rise complete within ≤ 2 px), and its width plausible (< 25% of line length). Border width per side comes from clusters of valid line widths: split a cluster when the gap is > 4 px. A valid center line uses itself when it agrees with the nearest cluster median (gap ≤ max 6 px or 35% of median), otherwise it uses that cluster median; an invalid center line uses the nearest cluster median from its center width, and when no cluster is within 12 px, uses the smallest cluster. When the center line is suspected of reading an interior band (its width far above the other lines), its profile is rescanned with a low threshold that still requires a sustained step. A side is marked Estimated when the chosen cluster holds fewer than 2 lines or the spread of valid lines is above 8 px. Measurement confidence is computed from the spread of valid lines only, then multiplied by the card-boundary (quad) detection confidence — combined confidence below 55%, a very thin measured border (< 6 px), disagreeing lines, or too small a straightening result makes that side Estimated. The score follows the most shifted axis; front and back are combined as the average of the two side scores, rounded to the nearest 0.5. When a side is Estimated, the side measured with certainty is the one used.",
     checklist: [
       "Left–right and top–bottom ratios are measured separately, not averaged",
       "Reference 10 (Gem Mint): max deviation 2.5 points from 50/50",
@@ -3903,7 +3903,9 @@ function combineAnalysis(front, back) {
        "tidak pasti untuk digabung" bila flag Perkiraan-nya true ATAU
        keyakinan quad (deteksi batas kartu) sisi itu < 80. Tepat satu
        sisi tidak pasti → centering mengikuti sisi satunya seutuhnya;
-       keduanya tidak pasti → skor minimum, seperti sebelumnya. */
+       keduanya tidak pasti → skor minimum, seperti sebelumnya.
+       v27.3.1 — bila kedua sisi pasti, gabungan memakai rata-rata
+       kedua skor sisi (dibulatkan ke 0,5 via clampScore), bukan minimum. */
     const quadOf = (sideObj) => {
       if (sideObj.centering && sideObj.centering.quadConf != null) return sideObj.centering.quadConf;
       const ev = sideObj.evidence && sideObj.evidence.centering;
@@ -3912,7 +3914,7 @@ function combineAnalysis(front, back) {
     const fQuad = quadOf(front), bQuad = quadOf(back);
     const fEst = Boolean(front.centering.estimated) || (fQuad !== null && fQuad < QUAD_CERTAIN);
     const bEst = Boolean(back.centering.estimated) || (bQuad !== null && bQuad < QUAD_CERTAIN);
-    let cScore, cNote;
+    let cScore, cNote, cCombine = null;
     if (fEst && !bEst) {
       cScore = cBack;
       cNote = "Front side uncertain when combined (Estimated and/or quad confidence < 80%) — centering follows the back side.";
@@ -3923,12 +3925,17 @@ function combineAnalysis(front, back) {
       cScore = Math.min(cFront, cBack);
       cNote = "Both sides uncertain when combined (Estimated and/or quad confidence < 80%) — score follows the more shifted side. A straight-down retake gives a more certain number.";
     } else {
-      cScore = Math.min(cFront, cBack);
-      cNote = "Score follows the more shifted side (worst side decides, no averaging bonus).";
+      /* v27.3.1 — kedua sisi pasti: rata-rata kedua skor sisi
+         (dibulatkan ke 0,5 via clampScore di bawah), bukan minimum. */
+      cScore = (cFront + cBack) / 2;
+      cCombine = "avg-v1";
+      cNote = "Centering is the average of the front (" + cFront.toFixed(1) + ") and back (" + cBack.toFixed(1) + ") side scores, rounded to the nearest 0.5.";
     }
     /* S7: rasio/bukti/temuan mengikuti SISI PENENTU SKOR (sisi dengan skor
        minimum; bila satu sisi tidak pasti, sisi pasti itulah penentunya
-       — sama dengan cScore di atas). */
+       — sama dengan cScore di atas). v27.3.1: detSide tetap sisi skor
+       minimum untuk rasio/bukti yang ditampilkan; skor gabungannya
+       sendiri kini rata-rata bila kedua sisi pasti. */
     const detSide = (!fEst && bEst) ? front : (fEst && !bEst) ? back : (cFront <= cBack ? front : back);
     centering = {
       score: clampScore(cScore),
@@ -3936,7 +3943,11 @@ function combineAnalysis(front, back) {
       lrPctRaw: detSide.centering.lrPctRaw, tbPctRaw: detSide.centering.tbPctRaw,
       confidence: detSide.centering.confidence != null ? detSide.centering.confidence : 1,
       estimated: fEst && bEst,
-      reason: "Front " + front.centering.lrText + " · " + front.centering.tbText + "; back " + back.centering.lrText + " · " + back.centering.tbText + ". Centering follows the " + (detSide === front ? "front" : "back") + " side (" + detSide.centering.lrText + " · " + detSide.centering.tbText + "). " + cNote,
+      /* v27.3.1: stempel aturan gabung — "avg-v1" hanya bila kedua sisi
+         pasti dan digabung rata-rata; null di cabang lain (satu sisi
+         tidak pasti, keduanya tidak pasti, atau ekstrem). */
+      combine: cCombine,
+      reason: "Front " + front.centering.lrText + " · " + front.centering.tbText + "; back " + back.centering.lrText + " · " + back.centering.tbText + ". " + (cCombine ? cNote : "Centering follows the " + (detSide === front ? "front" : "back") + " side (" + detSide.centering.lrText + " · " + detSide.centering.tbText + "). " + cNote),
     };
     centeringEvidenceSide = detSide;
   }
@@ -4906,6 +4917,26 @@ function handleDefectMarkerClick(target) {
     }
   }
 }
+function handleReportShowMarkerClick(target) {
+  const id = target.getAttribute("data-marker-id");
+  const side = target.getAttribute("data-side");
+  if (!id || (side !== "front" && side !== "back")) return;
+  state.selectedDefectId = id;
+  state.selectedDefectSide = side;
+  const root = (typeof document !== "undefined") ? document.getElementById("reportRoot") : null;
+  const section = root ? root.querySelector('section[aria-label="Photo of the card with defect markers"]') : null;
+  if (!section) return;
+  const shownMap = section.querySelector(".defect-map");
+  const shownSide = shownMap ? shownMap.getAttribute("data-side") : null;
+  if (shownSide !== side) {
+    /* Reuse the existing side swap — it only reads data-side off the target. */
+    handleReportSideClick({ getAttribute: function (k) { return k === "data-side" ? side : null; } });
+  }
+  const map = section.querySelector(".defect-map");
+  const dot = map ? map.querySelector('[data-marker-id="' + String(id).replace(/"/g, "") + '"]') : null;
+  if (dot) updateDefectDetailPanel(dot);
+  try { section.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) {}
+}
 function handleReportSideClick(target) {
   /* v27.0-fix (item 3): switching the report FRONT/BACK photo tab used to
      call renderReport() — a full re-render whose first line is
@@ -5108,7 +5139,8 @@ function subgradeCardHtml(o) {
     '<div class="subbar"><div style="width:' + (o.score * 10) + "%;background:" + gradeColor(o.score) + '"></div></div>' +
     (o.extra ? '<p class="fm" style="margin:0.5rem 0 0;font-size:12px">' + esc(o.extra) + "</p>" : "") +
     (o.detail ? '<p class="fm dim" style="margin:0.25rem 0 0;border-top:1px dashed var(--border);padding-top:0.375rem;font-size:11px;line-height:1.55">Measurement evidence — ' + esc(translateLegacyText(o.detail)) + "</p>" : "") +
-    '<p class="dim" style="margin:0.375rem 0 0;font-size:14px;line-height:1.6">' + esc(capFirst(o.reason || "")) + "</p></div>";
+    '<p class="dim" style="margin:0.375rem 0 0;font-size:14px;line-height:1.6">' + esc(capFirst(o.reason || "")) + "</p>" +
+    (o.note ? '<p class="fm dim" style="margin:0.375rem 0 0;font-size:11px;letter-spacing:0.08em;text-transform:uppercase">' + esc(o.note) + "</p>" : "") + "</div>";
 }
 function evidenceDetail(kind, ev) {
   if (!ev) return undefined;
@@ -6512,6 +6544,11 @@ function buildSavePayload(d, a, v, f, b, opts) {
     detail: {
       reasons: { centering: a.centering.reason, corners: a.corners.reason, edges: a.edges.reason, surface: a.surface.reason },
       centeringDetail: { lrText: a.centering.lrText, tbText: a.centering.tbText },
+      /* v27.3.1: versi aturan gabung centering depan+belakang —
+         "avg-v1" hanya bila kedua sisi pasti dan digabung rata-rata;
+         null bila tidak digabung (satu sisi, ekstrem, atau deferral
+         Estimated). Entri lama tidak punya stempel dan tampil tanpa label. */
+      centeringCombine: (a && a.centering && a.centering.combine) || null,
       annotations: a.annotations, findings: a.findings, evidence: a.evidence,
       bounds: a.bounds || null,
       identStatus: { needsConfirm: Boolean(d.needsConfirm), flags: d.consistencyFlags || [], confidenceServer: (typeof d.confidenceServer === "number" ? d.confidenceServer : null) },
@@ -7129,7 +7166,7 @@ function renderResultHtml() {
   html += '<div><h3 class="fd" style="font-size:18px;font-weight:700">Condition analysis from photos</h3>' +
     '<p class="dim" style="margin-top:0.125rem;font-size:12px">Each subgrade comes with its pixel measurement evidence, scored against the Analysis Standard threshold bands.</p>' +
     '<div class="mt2" style="display:grid;gap:0.75rem" id="subGrid">' +
-    subgradeCardHtml({ title: "CENTERING", score: a.centering.score, reason: a.centering.reason, extra: "Left–right " + a.centering.lrText + " · Top–bottom " + a.centering.tbText, detail: evidenceDetail("centering", ev) }) +
+    subgradeCardHtml({ title: "CENTERING", score: a.centering.score, reason: a.centering.reason, extra: "Left–right " + a.centering.lrText + " · Top–bottom " + a.centering.tbText, detail: evidenceDetail("centering", ev), note: a.centering.combine === "avg-v1" ? "Centering combined by average (v1)" : undefined }) +
     subgradeCardHtml({ title: "CORNERS", score: a.corners.score, reason: a.corners.reason, detail: evidenceDetail("corners", ev) }) +
     subgradeCardHtml({ title: "EDGES", score: a.edges.score, reason: a.edges.reason, detail: evidenceDetail("edges", ev) }) +
     subgradeCardHtml({ title: "SURFACE", score: a.surface.score, reason: a.surface.reason, detail: evidenceDetail("surface", ev) }) +
@@ -7270,7 +7307,7 @@ function historyCardHtml(pg) {
     const markersFrontHist = buildDefectMarkers(detail.findings, detail.annotations, "front", { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }, detail.bounds);
     html += '<div class="stack" style="border-top:1px solid var(--border);padding:0.75rem">' +
       '<div style="display:grid;gap:0.75rem" id="histSub-' + esc(String(pg.id)) + '">' +
-      subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev) }) +
+      subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev), note: detail.centeringCombine === "avg-v1" ? "Centering combined by average (v1)" : undefined }) +
       subgradeCardHtml({ title: "CORNERS", score: pg.corners, reason: translateLegacyText((detail.reasons || {}).corners), detail: evidenceDetail("corners", ev) }) +
       subgradeCardHtml({ title: "EDGES", score: pg.edges, reason: translateLegacyText((detail.reasons || {}).edges), detail: evidenceDetail("edges", ev) }) +
       subgradeCardHtml({ title: "SURFACE", score: pg.surface, reason: translateLegacyText((detail.reasons || {}).surface), detail: evidenceDetail("surface", ev) }) +
@@ -7511,6 +7548,142 @@ const REPORT_SUBS = [
   { key: "edges", label: "Edges" },
   { key: "surface", label: "Surface" },
 ];
+/* v27.3: report confidence — DISPLAY ONLY. Computed only from signals
+   already stored with the grading. The number is the LOWEST of the numeric
+   signals present (the report is only as confident as its weakest signal);
+   qualitative caveats are listed as reasons, never folded into the number
+   a second time. pg.confidence already carries the x0.6 penalty when the
+   client found uncovered disagreement (crossCheckDetection), so
+   needsConfirm is a reason line, not another deduction. Bands are TEG's
+   own scale, from the same stored signals — not DGC's bands. */
+function reportConfidence(pg, detail) {
+  const d = (detail && detail.identStatus && typeof detail.identStatus === "object") ? detail.identStatus : {};
+  let detConf = null;
+  if (typeof pg.confidence === "number" && Number.isFinite(pg.confidence) && pg.confidence > 0) detConf = Math.round(pg.confidence);
+  else if (typeof d.confidenceServer === "number" && Number.isFinite(d.confidenceServer) && d.confidenceServer > 0) detConf = Math.round(d.confidenceServer);
+  const ev = (detail && detail.evidence && typeof detail.evidence === "object") ? detail.evidence : null;
+  let centConf = null;
+  if (ev && ev.centering && typeof ev.centering.confidence === "number" && Number.isFinite(ev.centering.confidence)) centConf = Math.round(ev.centering.confidence * 100);
+  const centEstimated = Boolean(ev && ev.centering && ev.centering.estimated);
+  const estCorners = (ev && Array.isArray(ev.corners)) ? ev.corners.filter(function (c) { return c && c.estimated; }).length : 0;
+  const estEdges = (ev && Array.isArray(ev.edges)) ? ev.edges.filter(function (c) { return c && c.estimated; }).length : 0;
+  const needsConfirm = d.needsConfirm === true;
+  const nums = [];
+  if (detConf != null) nums.push(detConf);
+  if (centConf != null) nums.push(centConf);
+  const reasons = [];
+  const missing = [];
+  if (detConf == null) missing.push("detection confidence");
+  if (centConf == null) missing.push("measurement confidence");
+  if (needsConfirm) reasons.push("Detection runs disagreed on the card identity.");
+  if (centEstimated) reasons.push("Centering is estimated, not measured directly.");
+  if (estCorners + estEdges > 0) reasons.push("Some corner or edge readings are estimated.");
+  if (nums.length === 0) return { available: false, score: null, letter: null, label: null, reasons: reasons, missing: missing };
+  const score = Math.min.apply(null, nums);
+  let letter, label;
+  if (score >= 90) { letter = "A"; label = "Very high"; }
+  else if (score >= 75) { letter = "B"; label = "High"; }
+  else if (score >= 60) { letter = "C"; label = "Moderate"; }
+  else if (score >= 40) { letter = "D"; label = "Low"; }
+  else { letter = "E"; label = "Very low"; }
+  if (centConf != null && detConf != null && centConf < detConf) reasons.unshift("Lowest signal: centering measurement (" + centConf + "%).");
+  else if (detConf != null && centConf != null && detConf < centConf) reasons.unshift("Lowest signal: card detection (" + detConf + "%).");
+  else if (detConf != null && centConf == null) reasons.unshift("Based on card detection only — no measurement confidence was stored.");
+  else if (centConf != null && detConf == null) reasons.unshift("Based on centering measurement only — no detection confidence was stored.");
+  return { available: true, score: score, letter: letter, label: label, reasons: reasons, missing: missing };
+}
+function reportConfidenceHtml(conf) {
+  const c = (conf && typeof conf === "object") ? conf : {};
+  const reasons = (Array.isArray(c.reasons) ? c.reasons : []).map(function (r) {
+    return '<li class="dim" style="font-size:13px;line-height:1.6">' + esc(r) + "</li>";
+  }).join("");
+  const reasonsHtml = reasons ? '<ul style="list-style:none;margin:0.5rem 0 0;padding:0" class="stack">' + reasons + "</ul>" : "";
+  if (!c.available) {
+    return '<div class="slab-frame card" style="border-radius:1rem"><p class="kicker">[ Confidence ]</p>' +
+      '<p class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Confidence — Not available</p>' +
+      '<p class="dim" style="margin-top:0.25rem;font-size:13px;line-height:1.65">No confidence signals were stored with this grading.</p>' +
+      reasonsHtml + "</div>";
+  }
+  return '<div class="slab-frame card" style="border-radius:1rem"><p class="kicker">[ Confidence ]</p>' +
+    '<p class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Confidence ' + esc(String(c.score)) + "% — " + esc(c.label) + " (" + esc(c.letter) + ")</p>" +
+    reasonsHtml + "</div>";
+}
+function gradeBreakdownHtml(pg, detail, findings, allMarkers) {
+  const d = (detail && typeof detail === "object") ? detail : {};
+  const ev = (d.evidence && typeof d.evidence === "object") ? d.evidence : null;
+  const list = Array.isArray(findings) ? findings : [];
+  const markers = Array.isArray(allMarkers) ? allMarkers : [];
+  const reasons = (d.reasons && typeof d.reasons === "object") ? d.reasons : {};
+  const blocks = REPORT_SUBS.map(function (s) {
+    const key = s.key;
+    const score = pg[key];
+    const scoreText = (typeof score === "number" && Number.isFinite(score)) ? Number(score).toFixed(1) : "—";
+    const scoreColor = (typeof score === "number" && Number.isFinite(score)) ? gradeColor(score) : "var(--dim)";
+    let measure = "";
+    if (key === "centering") {
+      const parts = [];
+      if (d.centeringDetail) parts.push("Left–right " + d.centeringDetail.lrText + " · Top–bottom " + d.centeringDetail.tbText);
+      const ed = evidenceDetail("centering", ev);
+      if (ed) parts.push(ed);
+      measure = parts.join(" · ");
+    } else {
+      measure = evidenceDetail(key, ev) || "";
+    }
+    const reason = (typeof reasons[key] === "string" && reasons[key]) ? reasons[key] : "";
+    const subFindings = list.filter(function (f) { return f && DEFECT_SUBGRADE_KEY[f.kind] === key; });
+    let findingsHtml = "";
+    if (subFindings.length === 0) {
+      findingsHtml = '<p class="dim" style="margin:0.625rem 0 0;font-size:13px;line-height:1.6">No findings — nothing lowered this subgrade.</p>';
+    } else {
+      findingsHtml = '<ol style="list-style:none;margin:0.625rem 0 0;padding:0" class="stack">' + subFindings.map(function (f) {
+        const sev = SEVERITY_STYLE[f.severity] || SEVERITY_STYLE.ringan;
+        const markerId = f.side + "|" + f.kind + "|" + f.area;
+        let marker = markers.find(function (m) { return m && m.id === markerId; });
+        /* v27.3 fix: v27.0-fix merges a side's two centering findings (measured +
+           Estimated) into ONE marker carrying the measured finding's area, so
+           the Estimated finding's exact id never matches. The merged marker IS
+           that finding's point too — fall back to the side's centering marker. */
+        if (!marker && f.kind === "centering") marker = markers.find(function (m) { return m && m.side === f.side && m.category === "centering"; });
+        const visible = Boolean(marker && !marker.suppressed && (marker.severity === "sedang" || marker.severity === "berat"));
+        let markerHtml = "";
+        if (visible) {
+          const visibleSameSide = markers.filter(function (m) { return m && m.side === f.side && !m.suppressed && (m.severity === "sedang" || m.severity === "berat"); });
+          const n = visibleSameSide.indexOf(marker) + 1;
+          markerHtml = '<button type="button" data-action="report-show-marker" data-marker-id="' + esc(marker.id) + '" data-side="' + esc(f.side) + '" class="fc" style="margin-top:0.375rem;border-radius:0.5rem;border:1px solid var(--accent);background:transparent;color:var(--accent-deep);padding:0.375rem 0.75rem;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;min-height:2.25rem;cursor:pointer">Show on photo — marker ' + n + "</button>";
+        } else {
+          markerHtml = '<p class="dim" style="margin:0.375rem 0 0;font-size:12px;line-height:1.55">Not marked on the photo.</p>';
+        }
+        return '<li class="slab-frame" style="border-radius:0.75rem;background:var(--surface);padding:0.625rem 0.75rem">' +
+          '<div class="row-wrap"><span class="chip" style="' + sev.chip + '">' + sev.label + '</span>' +
+          '<p class="fd" style="font-size:14px;font-weight:700;line-height:1.3;margin:0">' + esc(capFirst(translateLegacyText(f.area))) + "</p></div>" +
+          '<p style="margin:0.375rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText(f.metric))) + "</p>" +
+          (typeof f.impact === "string" && f.impact ? '<p style="margin:0.25rem 0 0;font-size:13px;font-weight:600;line-height:1.6;color:var(--gold-deep)">' + esc(capFirst(translateLegacyText(f.impact))) + "</p>" : "") +
+          markerHtml + "</li>";
+      }).join("") + "</ol>";
+    }
+    return '<article class="slab-frame card" style="border-radius:1rem">' +
+      '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:0.5rem">' +
+      '<h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">' + esc(s.label) + "</h3>" +
+      '<span class="fd" style="font-size:32px;font-weight:900;line-height:1;color:' + scoreColor + '">' + scoreText + "</span></div>" +
+      '<p class="fm dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(measure || "No measurement detail stored.") + "</p>" +
+      (reason ? '<p class="dim" style="margin:0.375rem 0 0;font-size:14px;line-height:1.6">' + esc(capFirst(translateLegacyText(reason))) + "</p>" : "") +
+      findingsHtml + "</article>";
+  }).join("");
+  return '<section aria-label="Grade breakdown"><p class="kicker">[ Grade Breakdown ]</p>' +
+    '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Why this grade, subgrade by subgrade</h2>' +
+    '<p class="dim" style="margin:0.25rem 0 0.625rem;font-size:13px;line-height:1.65">Each subgrade shows the measurement behind its score and the findings that lowered it — with a link to its marker on the photo where one is shown.</p>' +
+    '<div class="mt2" style="display:grid;gap:0.75rem" id="repBreakGrid">' + blocks + "</div><style>@media (min-width:640px){#repBreakGrid{grid-template-columns:1fr 1fr}}</style></section>";
+}
+function understandReportHtml() {
+  return '<section aria-label="Understand this report" class="slab-frame card" style="border-radius:1rem"><p class="kicker">[ Understand This Report ]</p>' +
+    '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">How to read this report</h2>' +
+    '<ol style="margin:0.625rem 0 0;padding-left:1.25rem" class="stack">' +
+    '<li style="font-size:13.5px;line-height:1.65">The overall grade is the average of the four subgrades — Centering, Corners, Edges, Surface — rounded down to the nearest 0.5. Each subgrade is measured from the photo\'s pixels and matched to the Analysis Standard bands.</li>' +
+    '<li style="font-size:13.5px;line-height:1.65">What each subgrade measures: Centering compares the widths of the left, right, top, and bottom borders; Corners and Edges measure whitening on each corner and side; Surface counts suspicious cells in a grid over the card\'s surface.</li>' +
+    '<li style="font-size:13.5px;line-height:1.65">What the letter means: the number tells you the grade, the letter (A–E) tells you how confident the measurement is. A and B mean the signals behind the grade strongly agree; C, D, and E mean something is uncertain — the detection runs disagreed, or a measurement had to be estimated. The letter is TEG\'s own scale, built from the stored detection confidence and measurement confidence. A low letter does NOT change the grade — it only tells you how much the grade can be trusted.</li>' +
+    '<li style="font-size:13.5px;line-height:1.65">Limits: this is a condition estimate from photos. Defects the camera missed, glare, or a sleeve over the card can shift the result from a direct physical inspection.</li>' +
+    "</ol></section>";
+}
 async function renderReport(id) {
   const appRoot = $("#appRoot");
   const root = $("#reportRoot");
@@ -7562,6 +7735,7 @@ async function renderReport(id) {
       (pair[0] === "front" ? "Front" : "Back") + ": detected " + (pair[1].side === "front" ? "front" : "back") + (pair[1].side === pair[0] && pair[1].confidence >= 0.8 ? "" : " (?)") + " · " + Math.round(pair[1].confidence * 100) + "%");
     if (scParts.length) html += '<p class="fm dim" style="font-size:11.5px;line-height:1.6">Photo side classification at grading — ' + esc(scParts.join(" · ")) + ".</p>";
   }
+  html += reportConfidenceHtml(reportConfidence(pg, detail));
   /* Ringkasan kekurangan */
   html += '<div class="slab-frame card" style="border-radius:1rem"><p class="kicker">[ Flaw Summary ]</p>';
   if (weakest.length === 0) {
@@ -7595,6 +7769,7 @@ async function renderReport(id) {
       }).join("") + "</div><style>@media (min-width:640px){#zoomGrid{grid-template-columns:1fr 1fr}}</style>";
     }
     html += "</section>";
+    html += gradeBreakdownHtml(pg, detail, findings, allMarkers);
     /* Bukti foto */
     const side = state.reportSide === "back" && pg.backUrl ? "back" : "front";
     const sideUrl = side === "front" ? pg.frontUrl : pg.backUrl;
@@ -7617,7 +7792,7 @@ async function renderReport(id) {
   html += '<section aria-label="Measurement evidence per subgrade"><p class="kicker">[ Measurement Evidence ]</p>' +
     '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">The numbers behind every subgrade</h2>' +
     '<div class="mt2" style="display:grid;gap:0.75rem" id="repSubGrid">' +
-    subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev) }) +
+    subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev), note: detail.centeringCombine === "avg-v1" ? "Centering combined by average (v1)" : undefined }) +
     subgradeCardHtml({ title: "CORNERS", score: pg.corners, reason: translateLegacyText((detail.reasons || {}).corners), detail: evidenceDetail("corners", ev) }) +
     subgradeCardHtml({ title: "EDGES", score: pg.edges, reason: translateLegacyText((detail.reasons || {}).edges), detail: evidenceDetail("edges", ev) }) +
     subgradeCardHtml({ title: "SURFACE", score: pg.surface, reason: translateLegacyText((detail.reasons || {}).surface), detail: evidenceDetail("surface", ev) }) +
@@ -7640,6 +7815,7 @@ async function renderReport(id) {
     html += '<p class="dim" style="border:1px dashed var(--border);border-radius:0.75rem;padding:0.75rem 0.875rem;font-size:12px;line-height:1.65;margin:0">Photo quality — front: ' + (pq.front ? (pq.front.ok ? "meets the Photo Standard" : "below the Photo Standard") : "—") + " · back: " + (pq.back ? (pq.back.ok ? "meets the Photo Standard" : "below the Photo Standard") : "—") + ". Photos that meet the Photo Standard give the most accurate measurements.</p>";
   }
   html += '<p class="dim" style="font-size:12px;line-height:1.65">This report was generated automatically from photo analysis following Analysis Standard ' + esc(brand()) + '. Digital grading is a condition estimate from photos — defects the camera missed can make the result differ from a direct physical inspection.</p>';
+  html += understandReportHtml();
   html += "</div>";
   root.innerHTML = html;
   if (typeof initAnims === "function") initAnims(root);
@@ -8116,6 +8292,8 @@ document.addEventListener("click", (e) => {
     handleReportSideClick(target);
   } else if (action === "defect-marker") {
     handleDefectMarkerClick(target);
+  } else if (action === "report-show-marker") {
+    handleReportShowMarkerClick(target);
   } else if (action === "toggle-history") {
     const id = target.getAttribute("data-id");
     state.expandedId = String(state.expandedId) === String(id) ? null : id;
