@@ -4548,12 +4548,68 @@ function defectShortLabel(f) {
   }
   return label || raw || f.kind || "";
 }
-function buildDefectMarkers(findings, annotations, side, subgrades) {
+function defectCenterExtreme(annotations, side) {
+  /* v27.0-fix: the centering annotation label carries "Centering L/R · T/B".
+     combineAnalysis already treats |ratio-50| > 32 as extreme (line 3761):
+     a side whose centering is that extreme was measured through a bad quad
+     (e.g. the quad traced a sleeve, not the card), so every position derived
+     from that quad is unreliable. Returns false when there is no centering
+     annotation or the label does not parse (fail-open: do not suppress). */
+  const anns = (Array.isArray(annotations) ? annotations : []).filter((a) => a && a.side === side && a.kind === "centering");
+  if (!anns.length) return false;
+  const m = String(anns[0].label || "").match(/(\d+)\/(\d+)[\s\S]*?(\d+)\/(\d+)/);
+  if (!m) return false;
+  return Math.max(Math.abs(Number(m[1]) - 50), Math.abs(Number(m[3]) - 50)) > 32;
+}
+function markerOutsideQuad(x, y, bounds, side) {
+  /* v27.0-fix: true when the point falls outside the stored card outline
+     (detail.bounds[side].corners, TL/TR/BR/BL fractions). The quad is
+     expanded 3% about its centroid: a legitimate edge marker sits ~1.5%
+     inside the border, so it still passes. null = cannot test (no bounds
+     stored — legacy entries): never suppress on this layer. */
+  if (!bounds || typeof bounds !== "object") return null;
+  const b = bounds[side];
+  if (!b || !Array.isArray(b.corners) || b.corners.length !== 4) return null;
+  const c = b.corners;
+  if (!c.every((p) => Array.isArray(p) && typeof p[0] === "number" && typeof p[1] === "number" && isFinite(p[0]) && isFinite(p[1]))) return null;
+  const cx = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4;
+  const cy = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
+  const ex = c.map((p) => [cx + (p[0] - cx) * 1.03, cy + (p[1] - cy) * 1.03]);
+  try { return !pointInQuad([x, y], ex); } catch (e) { return null; }
+}
+function buildDefectMarkers(findings, annotations, side, subgrades, bounds) {
   const subs = (subgrades && typeof subgrades === "object") ? subgrades : {};
   const list = Array.isArray(findings) ? findings : [];
   const anns = Array.isArray(annotations) ? annotations : [];
+  const quadSuspect = defectCenterExtreme(anns, side);
+  /* v27.0-fix: the two centering findings for one side (measured + Estimated)
+     share one point — merge them into ONE marker. The Estimated reading is
+     attached to the marker (estimatedDetail) and shown in the detail panel;
+     it is not a second dot. The findings list keeps both findings. */
+  const merged = [];
+  const centerExtra = new Map();
+  list.forEach((f) => {
+    if (!f || typeof f !== "object") return;
+    if (f.kind !== "centering") { merged.push(f); return; }
+    if (!centerExtra.has(f.side)) {
+      const c = Object.assign({}, f);
+      centerExtra.set(f.side, { primary: c, est: null });
+      merged.push(c);
+    } else {
+      const slot = centerExtra.get(f.side);
+      if (!f.estimated && slot.primary.estimated) {
+        slot.est = { metric: slot.primary.metric, standard: (typeof slot.primary.standard === "string" ? slot.primary.standard : "") };
+        slot.primary.area = f.area; slot.primary.metric = f.metric;
+        slot.primary.standard = f.standard; slot.primary.impact = f.impact;
+        slot.primary.severity = f.severity; slot.primary.estimated = false;
+        slot.primary.x = f.x; slot.primary.y = f.y;
+      } else if (f.estimated && !slot.est) {
+        slot.est = { metric: f.metric, standard: (typeof f.standard === "string" ? f.standard : "") };
+      }
+    }
+  });
   const out = [];
-  list.forEach((f, i) => {
+  merged.forEach((f, i) => {
     if (!f || typeof f !== "object") return;
     if (f.side !== side) return;
     if (DEFECT_KINDS.indexOf(f.kind) < 0) return;
@@ -4567,6 +4623,17 @@ function buildDefectMarkers(findings, annotations, side, subgrades) {
     const sev = (f.severity === "berat" || f.severity === "sedang" || f.severity === "ringan" || f.severity === "baik") ? f.severity : "ringan";
     const subKey = DEFECT_SUBGRADE_KEY[f.kind];
     const sub = subs[subKey];
+    /* v27.0-fix: a marker whose stored position cannot be trusted is
+       suppressed from the PHOTO (the finding stays in the findings list,
+       the summary and the zoom section). "outsideQuad" = the point falls
+       outside the stored card outline. "quadSuspect" = this side's
+       centering is extreme, so the quad itself was mis-detected and every
+       position from it is unreliable; the centering marker itself is kept
+       — it marks the measurement position. */
+    let suppressed = null;
+    if (markerOutsideQuad(x, y, bounds, side) === true) suppressed = "outsideQuad";
+    else if (f.kind !== "centering" && quadSuspect) suppressed = "quadSuspect";
+    const slot = (f.kind === "centering") ? centerExtra.get(f.side) : null;
     out.push({
       id: side + "|" + f.kind + "|" + f.area,
       x: x, y: y,
@@ -4575,8 +4642,10 @@ function buildDefectMarkers(findings, annotations, side, subgrades) {
       severity: sev,
       subgrade: (typeof sub === "number" && Number.isFinite(sub)) ? sub : null,
       detail: { area: f.area, metric: f.metric, standard: (typeof f.standard === "string" ? f.standard : ""), impact: (typeof f.impact === "string" ? f.impact : "") },
+      estimatedDetail: (slot && slot.est) ? slot.est : null,
       side: side,
       estimated: Boolean(f.estimated) || fromDerive,
+      suppressed: suppressed,
       findingIndex: i,
     });
   });
@@ -4599,33 +4668,53 @@ function defectDetailPanelHtml(markers, url, side, selectedId) {
     '<p style="margin:0.375rem 0 0;font-size:14px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.detail.metric))) + '</p>' +
     (m.detail.standard ? '<p class="dim" style="margin:0.25rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.detail.standard))) + '</p>' : "") +
     (m.detail.impact ? '<p style="margin:0.25rem 0 0;font-size:13px;font-weight:600;line-height:1.6;color:var(--gold-deep)">' + esc(capFirst(translateLegacyText(m.detail.impact))) + '</p>' : "") +
+    (m.estimatedDetail && m.estimatedDetail.metric ? '<p class="dim" style="margin:0.25rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText("Estimated reading — " + m.estimatedDetail.metric))) + '</p>' : "") +
     '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.estimated ? "Estimated position" : "Measured point"))) + (typeof m.subgrade === "number" ? " · " + esc(capFirst(translateLegacyText(subLabel.toLowerCase() + " subgrade: " + m.subgrade.toFixed(1)))) : "") + '</p>' +
     (note ? '<p class="dim" style="margin:0.25rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(note))) + '</p>' : "") +
     '<div style="margin-top:0.75rem">' + zoomCardHtml(zoomItem, url) + '</div></div>';
 }
 function defectMapHtml(url, markers, side, selectedId, alt) {
   const list = Array.isArray(markers) ? markers : [];
-  const dots = list.map((m, i) => {
+  /* v27.0-fix: photo visibility is decided HERE, and only here. The findings
+     list, the per-category summary and the zoom section keep showing every
+     finding — only the dots on the photo are filtered:
+     (a) Minor (ringan) and Good (baik) findings are never dotted — user
+         decision 2026-11-15: only Moderate/Severe markers appear on the
+         photo; (b) markers flagged suppressed by buildDefectMarkers
+         (position outside the stored card outline, or from a quad that
+         looks mis-detected) are never dotted either. Both cases are
+         labelled honestly under the photo instead of vanishing silently. */
+  const suppressed = list.filter((m) => m && m.suppressed);
+  const candidates = list.filter((m) => m && !m.suppressed);
+  const visible = candidates.filter((m) => m.severity === "sedang" || m.severity === "berat");
+  const hiddenMinor = candidates.filter((m) => m.severity !== "sedang" && m.severity !== "berat");
+  const dots = visible.map((m, i) => {
     const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.ringan;
     const aria = m.label + ", " + sev.label.toLowerCase() + " defect, marker " + (i + 1) + (m.estimated ? ", estimated position" : "");
     return '<button type="button" class="annot-dot defect-marker" data-action="defect-marker" data-marker-id="' + esc(m.id) + '" data-side="' + esc(side) + '" aria-label="' + esc(capFirst(translateLegacyText(aria))) + '" aria-pressed="' + (m.id === selectedId) + '" style="left:' + (m.x * 100) + '%;top:' + (m.y * 100) + '%;background:' + (DEFECT_CATEGORY_COLOR[m.category] || "#cf5138") + '">' + (i + 1) + '</button>';
   }).join("");
-  const groups = ["corner", "edge", "surface", "centering"].map((k) => ({ kind: k, items: list.filter((m) => m.category === k) })).filter((g) => g.items.length > 0);
-  const legend = list.length === 0
+  const groups = ["corner", "edge", "surface", "centering"].map((k) => ({ kind: k, items: visible.filter((m) => m.category === k) })).filter((g) => g.items.length > 0);
+  const notes = [];
+  const outQ = suppressed.filter((m) => m.suppressed === "outsideQuad");
+  if (outQ.length > 0) notes.push(outQ.length === 1 ? "1 marker not shown — its position falls outside the detected card outline." : outQ.length + " markers not shown — their positions fall outside the detected card outline.");
+  const susQ = suppressed.filter((m) => m.suppressed === "quadSuspect");
+  if (susQ.length > 0) notes.push(susQ.length === 1 ? "1 marker not shown — this side's card outline looks unreliable, so its position can't be trusted." : susQ.length + " markers not shown — this side's card outline looks unreliable, so their positions can't be trusted.");
+  if (hiddenMinor.length > 0) notes.push(hiddenMinor.length === 1 ? "1 minor finding is listed below, not marked on the photo." : hiddenMinor.length + " minor findings are listed below, not marked on the photo.");
+  const legend = (visible.length === 0 && notes.length === 0)
     ? '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText("No defects marked on this side."))) + '</p>'
     : '<div style="margin-top:0.5rem">' + groups.map((g) => {
         const head = DEFECT_CATEGORY_LABEL[g.kind] + " (" + g.items.length + ")";
         const items = g.items.map((m) => {
-          const n = list.indexOf(m) + 1;
+          const n = visible.indexOf(m) + 1;
           const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.ringan;
           const text = n + " — " + capFirst(m.label) + " · " + sev.label + (m.estimated ? " (Estimated)" : "");
           return '<li class="dim" style="font-size:12px">' + esc(capFirst(translateLegacyText(text))) + '</li>';
         }).join("");
         return '<p class="fd" style="font-size:12px;font-weight:700;margin:0.5rem 0 0.125rem">' + esc(capFirst(translateLegacyText(head))) + '</p><ul style="list-style:none;margin:0;padding:0" class="stack">' + items + '</ul>';
-      }).join("") + '</div>';
-  return '<div class="defect-map" data-side="' + esc(side) + '" data-photo-url="' + esc(url) + '" data-markers="' + esc(JSON.stringify(list)) + '">' +
+      }).join("") + notes.map((t) => '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(t))) + '</p>').join("") + '</div>';
+  return '<div class="defect-map" data-side="' + esc(side) + '" data-photo-url="' + esc(url) + '" data-markers="' + esc(JSON.stringify(visible)) + '">' +
     '<div class="annot-wrap"><img src="' + esc(url) + '" alt="' + esc(alt) + '" />' + dots + '</div>' +
-    '<div class="defect-detail-panel" aria-live="polite">' + defectDetailPanelHtml(list, url, side, selectedId) + '</div>' +
+    '<div class="defect-detail-panel" aria-live="polite">' + defectDetailPanelHtml(visible, url, side, selectedId) + '</div>' +
     legend + '</div>';
 }
 function defectSummaryHtml(markers) {
@@ -4674,10 +4763,57 @@ function handleDefectMarkerClick(target) {
   if (!updateDefectDetailPanel(target)) {
     if (typeof document !== "undefined" && document.getElementById("reportRoot") && !document.getElementById("reportRoot").classList.contains("hidden")) {
       const raw = new URLSearchParams(window.location.search).get("report");
-      if (raw) void renderReport(raw);
+      if (raw) {
+        /* v27.0-fix: the fallback re-render scrolls to the top (renderReport
+           line 6959) — restore the scroll position once it finishes. */
+        const y = (typeof window !== "undefined") ? window.scrollY : 0;
+        const p = renderReport(raw);
+        if (p && typeof p.then === "function") p.then(() => { try { window.scrollTo(0, y); } catch (err) {} });
+      }
     } else if (typeof renderTab === "function") {
       renderTab();
     }
+  }
+}
+function handleReportSideClick(target) {
+  /* v27.0-fix (item 3): switching the report FRONT/BACK photo tab used to
+     call renderReport() — a full re-render whose first line is
+     window.scrollTo(0, 0) — throwing the page back to the top. Swap only
+     the photo map in place instead; the rest of the report is untouched
+     and the scroll position never moves. Fallback: full re-render with
+     the scroll position restored afterwards. */
+  const side = target.getAttribute("data-side");
+  if (side !== "front" && side !== "back") return;
+  state.reportSide = side;
+  state.selectedDefectSide = side;
+  const root = (typeof document !== "undefined") ? document.getElementById("reportRoot") : null;
+  const section = root ? root.querySelector('section[aria-label="Photo of the card with defect markers"]') : null;
+  const oldMap = section ? section.querySelector(".defect-map") : null;
+  let markers = null, url = "";
+  try {
+    if (section) {
+      markers = JSON.parse(section.getAttribute(side === "front" ? "data-front-markers" : "data-back-markers") || "null");
+      url = section.getAttribute(side === "front" ? "data-front-url" : "data-back-url") || "";
+    }
+  } catch (err) { markers = null; }
+  if (section && oldMap && Array.isArray(markers) && url) {
+    oldMap.outerHTML = defectMapHtml(url, markers, side, state.selectedDefectId, side + " photo of the card with defect markers");
+    const tabs = section.querySelectorAll('[data-action="report-side"]');
+    if (tabs && typeof tabs.forEach === "function") {
+      tabs.forEach((b) => {
+        const active = b.getAttribute("data-side") === side;
+        b.setAttribute("aria-selected", String(active));
+        b.style.background = active ? "#f5f5f2" : "var(--surface2)";
+        b.style.color = active ? "#0a0a0b" : "var(--dim)";
+      });
+    }
+    return;
+  }
+  const y = (typeof window !== "undefined") ? window.scrollY : 0;
+  const raw = new URLSearchParams(window.location.search).get("report");
+  if (raw) {
+    const p = renderReport(raw);
+    if (p && typeof p.then === "function") p.then(() => { try { window.scrollTo(0, y); } catch (err) {} });
   }
 }
 /* ===== v27 · DEFECT MAP — END ===== */
@@ -6573,8 +6709,8 @@ function renderResultHtml() {
     html += cardDetectPanelHtml(a.bounds.front, a.bounds.back, state.front ? state.front.url : null, state.back ? state.back.url : null, false);
   }
   /* Subgrade + foto bertanda */
-  const markersFrontResult = buildDefectMarkers(a.findings, a.annotations, "front", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score });
-  const markersBackResult = buildDefectMarkers(a.findings, a.annotations, "back", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score });
+  const markersFrontResult = buildDefectMarkers(a.findings, a.annotations, "front", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score }, a.bounds);
+  const markersBackResult = buildDefectMarkers(a.findings, a.annotations, "back", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score }, a.bounds);
   html += '<div><h3 class="fd" style="font-size:18px;font-weight:700">Condition analysis from photos</h3>' +
     '<p class="dim" style="margin-top:0.125rem;font-size:12px">Each subgrade comes with its pixel measurement evidence, scored against the Analysis Standard threshold bands.</p>' +
     '<div class="mt2" style="display:grid;gap:0.75rem" id="subGrid">' +
@@ -6715,7 +6851,7 @@ function historyCardHtml(pg) {
     '<span class="dim" style="display:block;margin-top:0.125rem;font-size:12px">' + (pg.hasEstimate ? "Estimate " + fmtIDR(pg.valueAtGrade) : "No estimate yet") + (pg.confidence > 0 ? " · detection " + pg.confidence + "%" : "") + "</span></span></button>";
   if (expanded) {
     const ev = detail.evidence;
-    const markersFrontHist = buildDefectMarkers(detail.findings, detail.annotations, "front", { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface });
+    const markersFrontHist = buildDefectMarkers(detail.findings, detail.annotations, "front", { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }, detail.bounds);
     html += '<div class="stack" style="border-top:1px solid var(--border);padding:0.75rem">' +
       '<div style="display:grid;gap:0.75rem" id="histSub-' + esc(String(pg.id)) + '">' +
       subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev) }) +
@@ -6905,6 +7041,7 @@ function derivePoint(f, annotations) {
 function buildZoomItems(findings, annotations) {
   const items = [];
   const used = new Set();
+  const seenCenter = new Set();
   (Array.isArray(findings) ? findings : []).forEach((f, i) => {
     if (!f || typeof f !== "object") return;
     const estimated = f.x == null || f.y == null;
@@ -6914,6 +7051,14 @@ function buildZoomItems(findings, annotations) {
       if (pt) { x = pt.x; y = pt.y; }
     }
     if (x == null || y == null) return;
+    /* v27.0-fix: the two centering findings for one side (measured +
+       Estimated) share one point — one zoom card, not two identical ones.
+       The first one wins (measured is pushed before Estimated). */
+    if (f.kind === "centering") {
+      const ck = f.side + "|" + Math.round(x * 40) + "-" + Math.round(y * 40);
+      if (seenCenter.has(ck)) return;
+      seenCenter.add(ck);
+    }
     const key = f.side + "-" + f.kind + "-" + Math.round(x * 40) + "-" + Math.round(y * 40) + "-" + i;
     if (used.has(key)) return;
     used.add(key);
@@ -6973,7 +7118,7 @@ async function renderReport(id) {
   const findings = Array.isArray(detail.findings) ? detail.findings.filter((f) => f && typeof f === "object") : [];
   const annotations = Array.isArray(detail.annotations) ? detail.annotations.filter((a) => a && typeof a === "object") : [];
   const zoomItems = buildZoomItems(findings, annotations).filter((z) => (z.side === "front" ? Boolean(pg.frontUrl) : Boolean(pg.backUrl)));
-  const allMarkers = ["front", "back"].flatMap((s) => buildDefectMarkers(findings, annotations, s, { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }));
+  const allMarkers = ["front", "back"].flatMap((s) => buildDefectMarkers(findings, annotations, s, { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }, detail.bounds));
   const subs = REPORT_SUBS.map((s) => ({ key: s.key, label: s.label, score: pg[s.key] })).sort((a, b2) => a.score - b2.score);
   const weakest = subs.filter((s) => s.score < 9.5);
   const berat = findings.filter((f) => f.severity === "berat").length;
@@ -7037,7 +7182,10 @@ async function renderReport(id) {
     /* Bukti foto */
     const side = state.reportSide === "back" && pg.backUrl ? "back" : "front";
     const sideUrl = side === "front" ? pg.frontUrl : pg.backUrl;
-    html += '<section aria-label="Photo of the card with defect markers"><p class="kicker">[ Photo Evidence ]</p>' +
+    html += '<section aria-label="Photo of the card with defect markers"' +
+      ' data-front-url="' + esc(pg.frontUrl || "") + '" data-back-url="' + esc(pg.backUrl || "") + '"' +
+      ' data-front-markers="' + esc(JSON.stringify(allMarkers.filter((m) => m.side === "front"))) + '"' +
+      ' data-back-markers="' + esc(JSON.stringify(allMarkers.filter((m) => m.side === "back"))) + '">' + '<p class="kicker">[ Photo Evidence ]</p>' +
       '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Where the defects are in the photo</h2>' +
       '<p class="dim" style="margin:0.25rem 0 0.625rem;font-size:13px;line-height:1.65">Tap a marker to see that defect\'s measurement.</p>' +
       '<div style="margin-bottom:0.5rem;display:flex;gap:0.5rem" role="tablist" aria-label="Choose photo side">' +
@@ -7543,9 +7691,7 @@ document.addEventListener("click", (e) => {
   } else if (action === "close-report") {
     closeReport();
   } else if (action === "report-side") {
-    state.reportSide = target.getAttribute("data-side");
-    const raw = new URLSearchParams(window.location.search).get("report");
-    if (raw) void renderReport(raw);
+    handleReportSideClick(target);
   } else if (action === "defect-marker") {
     handleDefectMarkerClick(target);
   } else if (action === "toggle-history") {
