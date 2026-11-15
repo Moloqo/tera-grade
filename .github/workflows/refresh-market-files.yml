@@ -1,0 +1,77 @@
+# Refresh market files — TEG v27.7 Fase 1b (TCGCSV-ONLY this round)
+# ---------------------------------------------------------------------------
+# Daily job (spec §5.5) — TCGCSV-ONLY in this round: downloads the TCGCSV
+# daily file, filters to groups mapped in Supabase `tcg_set_map`, and
+# upserts the mapped rows into `tcgplayer_prices`, then refreshes
+# `fx_rates`.
+#
+# DEFERRED (follow-up round, NOT this round — user decision 2026-11-16
+# 01:30 WIB): the Cardmarket price-guide download + upsert into
+# `cardmarket_prices`. The script gates it behind CARDMARKET_ENABLED
+# (default off, see below); do NOT flip it on in this round.
+#
+# SECRETS: this file contains NO secret values. SUPABASE_URL and
+# SUPABASE_SERVICE_ROLE_KEY come from GitHub Secrets (set by the repo
+# owner — see README.md in the same folder). Never paste a key here.
+#
+# FAILURE POLICY: a failed download never fails the job — the script logs a
+# warning and exits 0, so yesterday's tables stay in use (spec §5.5).
+# ---------------------------------------------------------------------------
+
+name: Refresh market files (TEG v27.7 Fase 1b — TCGCSV only)
+
+on:
+  schedule:
+    # ~03:00 UTC daily — after the TCGCSV dump (~20:00 UTC previous day)
+    # has been published.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tcgcsv_url:
+        description: "TCGCSV daily file URL (VERIFY_AT_BUILD — see README; leave empty to skip the TCGCSV step)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run — log what would be upserted, write nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One run at a time; a slow run is never cancelled mid-upsert.
+concurrency:
+  group: refresh-market-files
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Refresh market files
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Cardmarket step DEFERRED — follow-up round, NOT this round
+          # (user decision 2026-11-16 01:30 WIB). Leave "false": the
+          # script skips the Cardmarket download + upsert entirely.
+          # To re-enable later, set "true" AND verify the Cardmarket
+          # price-guide URL in the script (VERIFY_AT_BUILD, spec §2.3).
+          CARDMARKET_ENABLED: "false"
+          # TCGCSV file URL — VERIFY_AT_BUILD (spec §2.8 gives no exact
+          # file URL). Empty on schedule runs until the owner sets it here
+          # or via the workflow_dispatch input; the script skips the
+          # TCGCSV step with a warning when it is empty.
+          TCGCSV_URL: ${{ inputs.tcgcsv_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node .github/scripts/refresh-market-files.mjs

@@ -1,0 +1,17 @@
+# market-prices — function config (documents the required stanza)
+#
+# Supabase keeps per-function config in the PROJECT's supabase/config.toml
+# (there is no per-function config.toml deployed on its own). Copy this
+# stanza into that file. No detect-card config example exists in the
+# workspace to copy from, so this is the minimal stanza the client pattern
+# requires.
+#
+# verify_jwt = false is REQUIRED: the TEG client calls this function with
+# the anon/publishable key, exactly like detect-card (SB.base +
+# "/functions/v1/market-prices", headers `apikey` + `Authorization: Bearer
+# <key>`). With verify_jwt = true, Supabase would reject the anon key.
+# (Alternative at deploy time: `supabase functions deploy market-prices
+# --no-verify-jwt`.)
+
+[functions.market-prices]
+verify_jwt = false
