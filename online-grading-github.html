@@ -3026,6 +3026,185 @@ function detectHoloPattern(p, b) {
   const hueStd = Math.sqrt(Math.max(0, -2 * Math.log(Math.max(1e-6, R)))) * 180 / Math.PI;
   return hueStd > 50;
 }
+
+/* v27.1 · Capture Enhancement — three pure steps over p = { data, w, h }
+   (design-v271.md §3). Pure: no document/canvas/window; the input is never
+   mutated; each step returns { p, info }. Execution order is BINDING
+   (design §3.4): compensateLighting -> normalizeColor -> enhanceDetail.
+   Each step's statistics are measured from the previous step's output —
+   except holo, which always comes from the raw warp (holoPre, §3.5). */
+function validPixels(p) {
+  return !!p && typeof p.w === "number" && typeof p.h === "number" && p.w >= 8 && p.h >= 8 && p.data && p.data.length === p.w * p.h * 4;
+}
+function copyPixels(p) {
+  const out = new Uint8ClampedArray(p.data.length);
+  out.set(p.data);
+  return { data: out, w: p.w, h: p.h };
+}
+function enhanceInteriorBounds(b) {
+  const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+  return {
+    x0: Math.round(b.x0 + bw * 0.09), x1: Math.round(b.x1 - bw * 0.09),
+    y0: Math.round(b.y0 + bh * 0.09), y1: Math.round(b.y1 - bh * 0.09),
+  };
+}
+/* (a) Unsharp masking in the luminance domain: a 3x3 separable box blur
+   over L, the same delta added to R, G and B (hue/saturation nearly
+   untouched), clamped per pixel. Lifts micro-gradients (faint scratches)
+   without creating gradients on flat areas. */
+function enhanceDetail(p, opts) {
+  opts = opts || {};
+  const radius = opts.radius == null ? 1 : opts.radius;
+  const amount = opts.amount == null ? 0.5 : opts.amount;
+  const deltaClamp = opts.deltaClamp == null ? 18 : opts.deltaClamp;
+  if (!validPixels(p)) return { p: p, info: { applied: false, reason: "invalid input" } };
+  const w = p.w, h = p.h, n = w * h, r = Math.max(0, Math.round(radius));
+  const L = new Float32Array(n);
+  const d0 = p.data;
+  for (let i = 0; i < n; i++) L[i] = lumOf(d0[i * 4], d0[i * 4 + 1], d0[i * 4 + 2]);
+  const tmp = new Float32Array(n), blur = new Float32Array(n);
+  const span = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) { const xx = x + k < 0 ? 0 : (x + k >= w ? w - 1 : x + k); s += L[y * w + xx]; }
+      tmp[y * w + x] = s / span;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) { const yy = y + k < 0 ? 0 : (y + k >= h ? h - 1 : y + k); s += tmp[yy * w + x]; }
+      blur[y * w + x] = s / span;
+    }
+  }
+  const out = copyPixels(p);
+  const d = out.data;
+  for (let i = 0; i < n; i++) {
+    let dl = L[i] - blur[i];
+    if (dl > deltaClamp) dl = deltaClamp; else if (dl < -deltaClamp) dl = -deltaClamp;
+    const add = amount * dl, j = i * 4;
+    d[j] += add; d[j + 1] += add; d[j + 2] += add;
+  }
+  return { p: out, info: { applied: true } };
+}
+/* (b) Lighting compensation: map the interior luminance median to 128 with
+   one gain applied equally to R, G, B (hue/saturation unchanged), clamped to
+   [gainMin, gainMax]. A shoulder from kneeLo to kneeHi fades the gain to 1
+   (identity at kneeHi = 235, the glare threshold) so glare classification
+   is pixel-identical before vs after. kneeLo = 170 (decisions-v271.md #4):
+   f(L) = L*g(L) must stay strictly increasing up to gainMax 1.25 —
+   f'(235) = 1 - 235*0.25/65 ≈ 0.096; at kneeLo 200 the map turns
+   non-monotonic above gain 1.149 and L=225 overshoots 235 (false glare). */
+function compensateLighting(p, b, opts) {
+  opts = opts || {};
+  const targetMedian = opts.targetMedian == null ? 128 : opts.targetMedian;
+  const gainMin = opts.gainMin == null ? 0.8 : opts.gainMin;
+  const gainMax = opts.gainMax == null ? 1.25 : opts.gainMax;
+  const kneeLo = opts.kneeLo == null ? 170 : opts.kneeLo;
+  const kneeHi = opts.kneeHi == null ? 235 : opts.kneeHi;
+  const step = opts.step == null ? 4 : opts.step;
+  if (!validPixels(p) || !b) return { p: p, info: { applied: false, reason: "invalid input" } };
+  const ib = enhanceInteriorBounds(b);
+  const samples = [];
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(p, x, y);
+    samples.push(lumOf(c[0], c[1], c[2]));
+  }
+  if (samples.length < 100) return { p: p, info: { applied: false, reason: "too few interior samples" } };
+  const medBefore = medianOf(samples);
+  const gain = medBefore === 0 ? gainMax : Math.min(gainMax, Math.max(gainMin, targetMedian / medBefore));
+  const out = copyPixels(p);
+  const d = out.data, span = kneeHi - kneeLo;
+  for (let i = 0; i < d.length; i += 4) {
+    const L = lumOf(d[i], d[i + 1], d[i + 2]);
+    let g;
+    if (L >= kneeHi) continue;
+    else if (L >= kneeLo) g = 1 + (gain - 1) * (kneeHi - L) / span;
+    else g = gain;
+    d[i] *= g; d[i + 1] *= g; d[i + 2] *= g;
+  }
+  const after = [];
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(out, x, y);
+    after.push(lumOf(c[0], c[1], c[2]));
+  }
+  return { p: out, info: { applied: true, gain: gain, medianBefore: medBefore, medianAfter: medianOf(after) } };
+}
+/* (c) White-balance from near-neutral interior pixels (sat < satMax).
+   Skipped entirely for holo/foil (holo=true) and when the neutral reference
+   is too small (< minNeutralFrac of interior samples) — never guessed.
+   CALIBRATED default satMax = 0.30 (design §3.3 said 0.08): a 15% cast
+   (the §7.4 test cast) puts neutral gray at sat = (1.15-0.85)/1.15 = 0.26,
+   so satMax 0.08 finds ZERO reference pixels (neutralFrac 0) and WB never
+   runs — the §7.4 criteria (|R-B| <= 8 from ~45) are unachievable. 0.30
+   admits gray-under-cast while still excluding saturated art (sat ~1). */
+function normalizeColor(p, b, opts) {
+  opts = opts || {};
+  const holo = opts.holo === true;
+  const satMax = opts.satMax == null ? 0.30 : opts.satMax;
+  const minNeutralFrac = opts.minNeutralFrac == null ? 0.02 : opts.minNeutralFrac;
+  const gainMin = opts.gainMin == null ? 0.85 : opts.gainMin;
+  const gainMax = opts.gainMax == null ? 1.18 : opts.gainMax;
+  const step = opts.step == null ? 4 : opts.step;
+  if (holo) return { p: p, info: { applied: false, reason: "holo — foil left untouched", gains: null, neutralFrac: 0 } };
+  if (!validPixels(p) || !b) return { p: p, info: { applied: false, reason: "invalid input", gains: null, neutralFrac: 0 } };
+  const ib = enhanceInteriorBounds(b);
+  const rs = [], gs = [], bs = [];
+  let n = 0;
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(p, x, y);
+    n++;
+    if (satOf(c[0], c[1], c[2]) < satMax) { rs.push(c[0]); gs.push(c[1]); bs.push(c[2]); }
+  }
+  const neutralFrac = n === 0 ? 0 : rs.length / n;
+  if (n === 0 || neutralFrac < minNeutralFrac) return { p: p, info: { applied: false, reason: "insufficient neutral reference", gains: null, neutralFrac: neutralFrac } };
+  const medR = medianOf(rs), medG = medianOf(gs), medB = medianOf(bs);
+  const medGray = (medR + medG + medB) / 3;
+  const cg = (m) => (m === 0 ? 1 : Math.min(gainMax, Math.max(gainMin, medGray / m)));
+  const gains = { r: cg(medR), g: cg(medG), b: cg(medB) };
+  const out = copyPixels(p);
+  const d = out.data;
+  for (let i = 0; i < d.length; i += 4) { d[i] *= gains.r; d[i + 1] *= gains.g; d[i + 2] *= gains.b; }
+  return { p: out, info: { applied: true, gains: gains, neutralFrac: neutralFrac } };
+}
+/* Orchestrator — order is BINDING (design §3.4): lighting, then color,
+   then detail. Each step reads the previous step's output. */
+function applyCaptureEnhancement(p, b, opts) {
+  opts = opts || {};
+  const holo = opts.holo === true;
+  if (!validPixels(p)) return { p: p, info: { lighting: { applied: false, reason: "invalid input" }, color: { applied: false, reason: "invalid input", gains: null, neutralFrac: 0 }, detail: { applied: false, reason: "invalid input" }, holo: holo } };
+  const lit = compensateLighting(p, b, opts.lighting || {});
+  const col = normalizeColor(lit.p, b, Object.assign({}, opts.color || {}, { holo: holo }));
+  const det = enhanceDetail(col.p, opts.detail || {});
+  return { p: det.p, info: { lighting: lit.info, color: col.info, detail: det.info, holo: holo } };
+}
+/* Browser-only thumbnail helper (NOT pure — uses canvas; not tested in
+   Node). Follows the computePhotoDetect pattern: putImageData, downscale
+   to max 360 px wide, JPEG 0.82. */
+function enhanceThumbDataUrl(p, maxW) {
+  try {
+    if (!validPixels(p)) return null;
+    const tw = Math.min(maxW || 360, p.w), th = Math.max(1, Math.round(tw * p.h / p.w));
+    const src = document.createElement("canvas");
+    src.width = p.w; src.height = p.h;
+    const sctx = src.getContext("2d");
+    const idata = sctx.createImageData(p.w, p.h);
+    idata.data.set(p.data);
+    sctx.putImageData(idata, 0, 0);
+    const cv = document.createElement("canvas");
+    cv.width = tw; cv.height = th;
+    cv.getContext("2d").drawImage(src, 0, 0, tw, th);
+    return cv.toDataURL("image/jpeg", 0.82);
+  } catch (e) { return null; }
+}
+function makeEnhanceInfo(pRaw, pNew, enhInfo, holo) {
+  let beforeUrl = null, afterUrl = null;
+  try { beforeUrl = enhanceThumbDataUrl(pRaw, 360); } catch (e) { beforeUrl = null; }
+  try { afterUrl = enhanceThumbDataUrl(pNew, 360); } catch (e) { afterUrl = null; }
+  return { beforeUrl: beforeUrl, afterUrl: afterUrl, holo: !!holo, lighting: enhInfo.lighting, color: enhInfo.color, detail: enhInfo.detail };
+}
+
 /* Rasio whitening satu patch, tahan silau & latar. Hanya piksel VALID
    (di dalam bentuk kartu, bukan silau) yang dihitung — di pembilang
    maupun penyebut. Piksel kandidat aus harus: terang, pudar, jauh
@@ -3129,6 +3308,19 @@ function analyzeSide(img, side) {
       return { x: s.x / Math.max(1, p0.w - 1), y: s.y / Math.max(1, p0.h - 1) };
     };
   }
+  /* v27.1 · Capture Enhancement — holo dibaca di warp MENTAH (desain §3.5),
+     lalu tiga langkah murni atas p (desain §3.4: lighting -> color -> detail).
+     p mentah dipertahankan sebagai pRaw hanya untuk thumbnail before; bila
+     enhancement gagal, grading lanjut dengan p mentah. */
+  let holoPre = false;
+  try { holoPre = detectHoloPattern(p, b); } catch (e) { holoPre = false; }
+  let enhanceInfo = null;
+  try {
+    const enhRes = applyCaptureEnhancement(p, b, { holo: holoPre });
+    const pRaw = p;
+    p = enhRes.p;
+    enhanceInfo = makeEnhanceInfo(pRaw, p, enhRes.info, holoPre);
+  } catch (e) { /* enhancement gagal — lanjut dengan p mentah; enhanceInfo tetap null */ }
   /* Konteks ukur (masker bentuk kartu + masker silau + baseline
      border) untuk semua pengukuran di bawah. Di ruang warp masker
      bentuk aktif penuh; di mode fallback (kartu tidak terdeteksi)
@@ -3378,7 +3570,7 @@ function analyzeSide(img, side) {
   const cellEnergies = cellList.map((c) => c.energy);
   const medEnergy = medianOf(cellEnergies);
   const madEnergy = medianOf(cellEnergies.map((e) => Math.abs(e - medEnergy))) * 1.4826;
-  const holo = detectHoloPattern(p, b);
+  const holo = holoPre; /* v27.1: holo from the raw warp (see hook above) */
   /* K6: lantai absolut diturunkan (42->36, holo 56->50) + metrik sensitif
      garis: gradien maksimum per sel (maxGrad) ikut menjadi sinyal
      goresan — goresan tipis yang hilang saat dirata-rata tetap punya
@@ -3548,7 +3740,7 @@ function analyzeSide(img, side) {
         + (holo ? " Holo/foil detected in the image area — surface threshold raised so holo shine is not read as scratches." : "")
         + (surfaceUncertain ? " Part of the surface is Estimated (stains/glare dominate) — the number is uncertain." : ""),
     },
-    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo,
+    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo, enhance: enhanceInfo,
   };
 }
 function combineAnalysis(front, back) {
@@ -4132,6 +4324,9 @@ const state = {
   autoDetectError: "",
   autoDetectStatus: "",
   photoSide: "front",
+  /* capture enhancement v27.1 — before/after thumbnails, session only */
+  enhance: null,
+  enhanceView: "after",
   loadingSample: false,
   loadingPhoto: false,
   expandedId: null,
@@ -5964,6 +6159,7 @@ async function runAnalysis(isSample) {
   state.gStage = "scanning";
   state.detectError = "";
   state.photoSide = "front";
+  state.enhance = null; state.enhanceView = "after";
   state.scanStep = 0;
   renderTab();
   const scanEl = document.getElementById("scanSteps");
@@ -6027,6 +6223,8 @@ async function runAnalysis(isSample) {
   state.det = detection;
   state.values = vals;
   state.analysis = combined;
+  state.enhance = { front: fa ? fa.enhance : null, back: ba ? ba.enhance : null };
+  state.enhanceView = "after";
   state.dirty = false;
   /* K2 — TUNDA PERSIST: hasil dihitung + ditampilkan sebagai DRAF LOKAL
      dulu; TIDAK ada baris Supabase yang dibuat di sini. Persist hanya
@@ -6114,6 +6312,7 @@ function resetGrading() {
   state.autoDet = null; state.autoValues = null; state.autoDetectError = ""; state.autoDetecting = false; state.autoDetectStatus = "";
   state.priceStale = false; state.identityConfirmed = false; state.pendingPersist = false; state.correctionErrors = []; state.saveBlockedReason = "";
   state.detectError = ""; state.photoSide = "front";
+  state.enhance = null; state.enhanceView = "after";
   state._sampleLoaded = false;
   /* Reset berarti mulai bersih — draf sesi ikut dibuang agar tidak
      bangkit lagi saat halaman Grading dibuka kembali. */
@@ -6391,6 +6590,27 @@ function renderResultHtml() {
     (state.photoSide === "front" && state.front ? defectMapHtml(state.front.url, markersFrontResult, "front", state.selectedDefectId, "Front photo of card with defect markers") : "") +
     (state.photoSide === "back" && state.back ? defectMapHtml(state.back.url, markersBackResult, "back", state.selectedDefectId, "Back photo of card with defect markers") : "") +
     "</div></div></div>";
+  /* v27.1 · Capture Enhancement — before/after comparison (warp only, no
+     markers: marker coordinates live in raw-photo space, so they must never
+     be drawn over the straightened image). Shown only when this side has
+     enhance info from a fresh grading. */
+  (function () {
+    const enh = state.enhance ? state.enhance[state.photoSide] : null;
+    if (!enh || (!enh.beforeUrl && !enh.afterUrl)) return;
+    const view = state.enhanceView === "before" ? "before" : "after";
+    const url = view === "before" ? (enh.beforeUrl || enh.afterUrl) : (enh.afterUrl || enh.beforeUrl);
+    const sideWord = state.photoSide === "back" ? "back" : "front";
+    const altText = "Straightened " + sideWord + " photo, " + view + " view";
+    const tabBtn = function (v, label) {
+      const on = view === v;
+      return '<button type="button" role="tab" data-action="enhance-view" data-view="' + v + '" aria-selected="' + on + '" class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (on ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + '">' + esc(capFirst(translateLegacyText(label))) + '</button>';
+    };
+    html += '<div class="slab-frame" style="border-radius:1rem;background:var(--surface);padding:0.75rem 0.875rem">' +
+      '<p class="fd" style="font-size:15px;font-weight:700">' + esc(capFirst(translateLegacyText("capture enhancement — before / after"))) + '</p>' +
+      '<div style="display:flex;gap:0.5rem" role="tablist" aria-label="Compare straightened photo">' + tabBtn("before", "Original") + tabBtn("after", "Enhanced") + '</div>' +
+      '<div style="margin:0.5rem auto 0;max-width:24rem"><img src="' + esc(url) + '" alt="' + esc(capFirst(translateLegacyText(altText))) + '" style="width:100%;border-radius:0.5rem;display:block" /></div>' +
+      '<p class="dim" style="font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText("The enhanced view sharpens detail already in the photo so faint scratches and edge wear read more clearly. It does not add detail beyond what the camera captured."))) + '</p></div>';
+  })();
   html += defectSummaryHtml(markersFrontResult.concat(markersBackResult));
   /* Temuan */
   html += '<div><p class="kicker">[ Temuan per Area ]</p><h3 class="fd" style="margin-top:0.25rem;font-size:18px;font-weight:700">Which parts are not so good?</h3>' +
@@ -7261,6 +7481,9 @@ document.addEventListener("click", (e) => {
     }
   } else if (action === "photo-side") {
     state.photoSide = target.getAttribute("data-side");
+    renderTab();
+  } else if (action === "enhance-view") {
+    state.enhanceView = target.getAttribute("data-view") === "before" ? "before" : "after";
     renderTab();
   } else if (action === "confirm-identity") {
     /* E1: konfirmasi eksplisit identitas hasil deteksi — membuka gate
