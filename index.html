@@ -201,6 +201,12 @@
               align-items: center; justify-content: center; border-radius: 999px; border: 2px solid #fff;
               font-size: 11px; font-weight: 900; color: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
             }
+      /* Defect map v27 — clickable defect markers (next to .annot-dot).
+         Do not add object-fit:cover or cropping to .annot-wrap img — defect
+         markers are positioned by % of the full photo. */
+            .defect-marker { cursor: pointer; padding: 0; font: inherit; }
+            .defect-marker[aria-pressed="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--gold); }
+            .defect-marker:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       
       /* History + pop rows */
             .hist-head { display: flex; width: 100%; align-items: stretch; gap: 0.75rem; text-align: left; background: none; border: 0; color: var(--text); padding: 0; }
@@ -1292,7 +1298,13 @@ function findCardBounds(p) {
         bukan tepi luar sejati (kontras rendah DAN latar luar tidak
         seragam DAN tidak menempel bingkai foto) hukumannya dikali 0,78.
         Bila satu kandidat memuat kandidat lain yang nilainya bersaing,
-        yang LUAR yang menang — batas kartu adalah batas terluar.
+        pemenangnya ditentukan aturan bersarang dua arah di
+        detectCardBoundary: kandidat DALAM menang hanya bila pita
+        bordernya jauh lebih solid (+0,18) dan skornya bersaing —
+        itu perlindungan kartu di dalam sleeve; kandidat LUAR menang
+        bila bukti border dan skornya setara — itu perlindungan dari
+        garis aus di dalam kartu yang meniru tepi. Bukan "yang luar
+        selalu menang".
      4) PENGHALUSAN SUDUT: tiap sisi dicari ulang sebagai GARIS — di
         sepanjang sisi diambil puncak gradien dalam radius ±7 px, garis
         dipasang total-least-squares dengan penolakan outlier, lalu
@@ -2434,6 +2446,42 @@ function finishDetection(p, quad, confidence, source, side, wantWarp, quadMeta) 
     warped: wantWarp ? wr.warped : null, homography: wantWarp ? wr.homography : null,
   };
 }
+/* Bounding box of a quad (px corners) with a 9% inset on each side,
+   clamped to the image - the sampling box for lighting statistics
+   (compensateLighting insets a further 9% internally, so the effective
+   sampling region is ~17% inside the quad bbox). Same definition as the
+   Phase 0 harness (gain-variants §1, gate-calibration §1). */
+function quadBBox(corners, w, h) {
+  const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1]);
+  const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+  const y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+  const bw = x1 - x0, bh = y1 - y0;
+  const b = {
+    x0: Math.round(x0 + bw * 0.09), x1: Math.round(x1 - bw * 0.09),
+    y0: Math.round(y0 + bh * 0.09), y1: Math.round(y1 - bh * 0.09),
+  };
+  b.x0 = Math.max(0, Math.min(w - 1, b.x0));
+  b.x1 = Math.max(0, Math.min(w - 1, b.x1));
+  b.y0 = Math.max(0, Math.min(h - 1, b.y0));
+  b.y1 = Math.max(0, Math.min(h - 1, b.y1));
+  return b;
+}
+/* Max per-corner Euclidean displacement between two quads (px). Used by
+   the v27.1f quad-challenger acceptance cap. Corners are reconstructed
+   from fractional det.corners with xw (NOT x(w-1)): the x(w-1) convention
+   shrinks the quad ~1 px at the edges (Phase 0, gain-variants §1).
+   Returns Infinity for malformed input, so a bad challenger can never
+   pass the cap. */
+function maxQuadShift(quadA, quadB) {
+  if (!Array.isArray(quadA) || !Array.isArray(quadB) || quadA.length !== 4 || quadB.length !== 4) return Infinity;
+  let max = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quadA[i], b = quadB[i];
+    if (!a || !b || !isFinite(a[0]) || !isFinite(a[1]) || !isFinite(b[0]) || !isFinite(b[1])) return Infinity;
+    max = Math.max(max, Math.hypot(a[0] - b[0], a[1] - b[1]));
+  }
+  return max;
+}
 function detectCardBoundary(p, opts) {
   opts = opts || {};
   const wantWarp = Boolean(opts.warp);
@@ -2599,6 +2647,10 @@ function detectCardBoundary(p, opts) {
       }
     }
     if (!best) return fail(15);
+    /* Invarian kalibrasi (v27.1h): gerbang challenger Opsi A (median < 90,
+       cap geser ≤ 25 px) dan ambang aturan bersarang ini dikalibrasi untuk
+       p0 maxDim = 720 (lihat loadPixels). Bila maxDim berubah, kalibrasi
+       ulang kedua gerbang ini wajib. */
     /* Pemilihan bersarang berbasis bukti pita border tercetak.
        Dua arah, karena dua kegagalan nyata berlawanan:
        - DALAM menang (kartu di dalam sleeve/toploader): kandidat yang
@@ -2621,8 +2673,11 @@ function detectCardBoundary(p, opts) {
         const aC = quadAreaPx(cand.quad), aB = quadAreaPx(best.quad);
         if (aC <= aB * 0.97 && quadContains(best.quad, cand.quad, 0.02)) {
           const bIn = cand.sc.borderScore || 0, bOut = best.sc.borderScore || 0;
-          if ((bIn >= bOut + 0.18 && aC >= aB * 0.55 && cand.sc.score >= best.sc.score - 0.22) ||
-              (bIn >= bOut + 0.08 && aC >= aB * 0.72 && cand.sc.score >= best.sc.score - 0.18)) { best = cand; switched = true; }
+          // v27.1h (N1 inner-strict): DALAM-menang hanya lewat klausa A (+0,18 border).
+          // Klausa B (+0,08) dihapus: ia memveto quad benar di foto gelap,
+          // sementara klausa A tidak pernah menyala dalam 35 switch yang teramati
+          // (investigasi nested-selection, 2026-11-15). Cabang LUAR di bawah tidak berubah.
+          if (bIn >= bOut + 0.18 && aC >= aB * 0.55 && cand.sc.score >= best.sc.score - 0.22) { best = cand; switched = true; }
         } else if (aC >= aB * 1.05 && aC <= aB * 1.35 && quadContains(cand.quad, best.quad, 0.035)) {
           /* Varian sintetis (pelengkap rasio / tumbuh) tidak boleh
              merebut kemenangan lewat aturan luar-menang: mereka memang
@@ -3020,6 +3075,185 @@ function detectHoloPattern(p, b) {
   const hueStd = Math.sqrt(Math.max(0, -2 * Math.log(Math.max(1e-6, R)))) * 180 / Math.PI;
   return hueStd > 50;
 }
+
+/* v27.1 · Capture Enhancement — three pure steps over p = { data, w, h }
+   (design-v271.md §3). Pure: no document/canvas/window; the input is never
+   mutated; each step returns { p, info }. Execution order is BINDING
+   (design §3.4): compensateLighting -> normalizeColor -> enhanceDetail.
+   Each step's statistics are measured from the previous step's output —
+   except holo, which always comes from the raw warp (holoPre, §3.5). */
+function validPixels(p) {
+  return !!p && typeof p.w === "number" && typeof p.h === "number" && p.w >= 8 && p.h >= 8 && p.data && p.data.length === p.w * p.h * 4;
+}
+function copyPixels(p) {
+  const out = new Uint8ClampedArray(p.data.length);
+  out.set(p.data);
+  return { data: out, w: p.w, h: p.h };
+}
+function enhanceInteriorBounds(b) {
+  const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+  return {
+    x0: Math.round(b.x0 + bw * 0.09), x1: Math.round(b.x1 - bw * 0.09),
+    y0: Math.round(b.y0 + bh * 0.09), y1: Math.round(b.y1 - bh * 0.09),
+  };
+}
+/* (a) Unsharp masking in the luminance domain: a 3x3 separable box blur
+   over L, the same delta added to R, G and B (hue/saturation nearly
+   untouched), clamped per pixel. Lifts micro-gradients (faint scratches)
+   without creating gradients on flat areas. */
+function enhanceDetail(p, opts) {
+  opts = opts || {};
+  const radius = opts.radius == null ? 1 : opts.radius;
+  const amount = opts.amount == null ? 0.5 : opts.amount;
+  const deltaClamp = opts.deltaClamp == null ? 18 : opts.deltaClamp;
+  if (!validPixels(p)) return { p: p, info: { applied: false, reason: "invalid input" } };
+  const w = p.w, h = p.h, n = w * h, r = Math.max(0, Math.round(radius));
+  const L = new Float32Array(n);
+  const d0 = p.data;
+  for (let i = 0; i < n; i++) L[i] = lumOf(d0[i * 4], d0[i * 4 + 1], d0[i * 4 + 2]);
+  const tmp = new Float32Array(n), blur = new Float32Array(n);
+  const span = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) { const xx = x + k < 0 ? 0 : (x + k >= w ? w - 1 : x + k); s += L[y * w + xx]; }
+      tmp[y * w + x] = s / span;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) { const yy = y + k < 0 ? 0 : (y + k >= h ? h - 1 : y + k); s += tmp[yy * w + x]; }
+      blur[y * w + x] = s / span;
+    }
+  }
+  const out = copyPixels(p);
+  const d = out.data;
+  for (let i = 0; i < n; i++) {
+    let dl = L[i] - blur[i];
+    if (dl > deltaClamp) dl = deltaClamp; else if (dl < -deltaClamp) dl = -deltaClamp;
+    const add = amount * dl, j = i * 4;
+    d[j] += add; d[j + 1] += add; d[j + 2] += add;
+  }
+  return { p: out, info: { applied: true } };
+}
+/* (b) Lighting compensation: map the interior luminance median to 128 with
+   one gain applied equally to R, G, B (hue/saturation unchanged), clamped to
+   [gainMin, gainMax]. A shoulder from kneeLo to kneeHi fades the gain to 1
+   (identity at kneeHi = 235, the glare threshold) so glare classification
+   is pixel-identical before vs after. kneeLo = 170 (decisions-v271.md #4):
+   f(L) = L*g(L) must stay strictly increasing up to gainMax 1.25 —
+   f'(235) = 1 - 235*0.25/65 ≈ 0.096; at kneeLo 200 the map turns
+   non-monotonic above gain 1.149 and L=225 overshoots 235 (false glare). */
+function compensateLighting(p, b, opts) {
+  opts = opts || {};
+  const targetMedian = opts.targetMedian == null ? 128 : opts.targetMedian;
+  const gainMin = opts.gainMin == null ? 0.8 : opts.gainMin;
+  const gainMax = opts.gainMax == null ? 1.25 : opts.gainMax;
+  const kneeLo = opts.kneeLo == null ? 170 : opts.kneeLo;
+  const kneeHi = opts.kneeHi == null ? 235 : opts.kneeHi;
+  const step = opts.step == null ? 4 : opts.step;
+  if (!validPixels(p) || !b) return { p: p, info: { applied: false, reason: "invalid input" } };
+  const ib = enhanceInteriorBounds(b);
+  const samples = [];
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(p, x, y);
+    samples.push(lumOf(c[0], c[1], c[2]));
+  }
+  if (samples.length < 100) return { p: p, info: { applied: false, reason: "too few interior samples" } };
+  const medBefore = medianOf(samples);
+  const gain = medBefore === 0 ? gainMax : Math.min(gainMax, Math.max(gainMin, targetMedian / medBefore));
+  const out = copyPixels(p);
+  const d = out.data, span = kneeHi - kneeLo;
+  for (let i = 0; i < d.length; i += 4) {
+    const L = lumOf(d[i], d[i + 1], d[i + 2]);
+    let g;
+    if (L >= kneeHi) continue;
+    else if (L >= kneeLo) g = 1 + (gain - 1) * (kneeHi - L) / span;
+    else g = gain;
+    d[i] *= g; d[i + 1] *= g; d[i + 2] *= g;
+  }
+  const after = [];
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(out, x, y);
+    after.push(lumOf(c[0], c[1], c[2]));
+  }
+  return { p: out, info: { applied: true, gain: gain, medianBefore: medBefore, medianAfter: medianOf(after) } };
+}
+/* (c) White-balance from near-neutral interior pixels (sat < satMax).
+   Skipped entirely for holo/foil (holo=true) and when the neutral reference
+   is too small (< minNeutralFrac of interior samples) — never guessed.
+   CALIBRATED default satMax = 0.30 (design §3.3 said 0.08): a 15% cast
+   (the §7.4 test cast) puts neutral gray at sat = (1.15-0.85)/1.15 = 0.26,
+   so satMax 0.08 finds ZERO reference pixels (neutralFrac 0) and WB never
+   runs — the §7.4 criteria (|R-B| <= 8 from ~45) are unachievable. 0.30
+   admits gray-under-cast while still excluding saturated art (sat ~1). */
+function normalizeColor(p, b, opts) {
+  opts = opts || {};
+  const holo = opts.holo === true;
+  const satMax = opts.satMax == null ? 0.30 : opts.satMax;
+  const minNeutralFrac = opts.minNeutralFrac == null ? 0.02 : opts.minNeutralFrac;
+  const gainMin = opts.gainMin == null ? 0.85 : opts.gainMin;
+  const gainMax = opts.gainMax == null ? 1.18 : opts.gainMax;
+  const step = opts.step == null ? 4 : opts.step;
+  if (holo) return { p: p, info: { applied: false, reason: "holo — foil left untouched", gains: null, neutralFrac: 0 } };
+  if (!validPixels(p) || !b) return { p: p, info: { applied: false, reason: "invalid input", gains: null, neutralFrac: 0 } };
+  const ib = enhanceInteriorBounds(b);
+  const rs = [], gs = [], bs = [];
+  let n = 0;
+  for (let y = ib.y0; y <= ib.y1; y += step) for (let x = ib.x0; x <= ib.x1; x += step) {
+    const c = pxAt(p, x, y);
+    n++;
+    if (satOf(c[0], c[1], c[2]) < satMax) { rs.push(c[0]); gs.push(c[1]); bs.push(c[2]); }
+  }
+  const neutralFrac = n === 0 ? 0 : rs.length / n;
+  if (n === 0 || neutralFrac < minNeutralFrac) return { p: p, info: { applied: false, reason: "insufficient neutral reference", gains: null, neutralFrac: neutralFrac } };
+  const medR = medianOf(rs), medG = medianOf(gs), medB = medianOf(bs);
+  const medGray = (medR + medG + medB) / 3;
+  const cg = (m) => (m === 0 ? 1 : Math.min(gainMax, Math.max(gainMin, medGray / m)));
+  const gains = { r: cg(medR), g: cg(medG), b: cg(medB) };
+  const out = copyPixels(p);
+  const d = out.data;
+  for (let i = 0; i < d.length; i += 4) { d[i] *= gains.r; d[i + 1] *= gains.g; d[i + 2] *= gains.b; }
+  return { p: out, info: { applied: true, gains: gains, neutralFrac: neutralFrac } };
+}
+/* Orchestrator — order is BINDING (design §3.4): lighting, then color,
+   then detail. Each step reads the previous step's output. */
+function applyCaptureEnhancement(p, b, opts) {
+  opts = opts || {};
+  const holo = opts.holo === true;
+  if (!validPixels(p)) return { p: p, info: { lighting: { applied: false, reason: "invalid input" }, color: { applied: false, reason: "invalid input", gains: null, neutralFrac: 0 }, detail: { applied: false, reason: "invalid input" }, holo: holo } };
+  const lit = compensateLighting(p, b, opts.lighting || {});
+  const col = normalizeColor(lit.p, b, Object.assign({}, opts.color || {}, { holo: holo }));
+  const det = enhanceDetail(col.p, opts.detail || {});
+  return { p: det.p, info: { lighting: lit.info, color: col.info, detail: det.info, holo: holo } };
+}
+/* Browser-only thumbnail helper (NOT pure — uses canvas; not tested in
+   Node). Follows the computePhotoDetect pattern: putImageData, downscale
+   to max 360 px wide, JPEG 0.82. */
+function enhanceThumbDataUrl(p, maxW) {
+  try {
+    if (!validPixels(p)) return null;
+    const tw = Math.min(maxW || 360, p.w), th = Math.max(1, Math.round(tw * p.h / p.w));
+    const src = document.createElement("canvas");
+    src.width = p.w; src.height = p.h;
+    const sctx = src.getContext("2d");
+    const idata = sctx.createImageData(p.w, p.h);
+    idata.data.set(p.data);
+    sctx.putImageData(idata, 0, 0);
+    const cv = document.createElement("canvas");
+    cv.width = tw; cv.height = th;
+    cv.getContext("2d").drawImage(src, 0, 0, tw, th);
+    return cv.toDataURL("image/jpeg", 0.82);
+  } catch (e) { return null; }
+}
+function makeEnhanceInfo(pRaw, pNew, enhInfo, holo) {
+  let beforeUrl = null, afterUrl = null;
+  try { beforeUrl = enhanceThumbDataUrl(pRaw, 360); } catch (e) { beforeUrl = null; }
+  try { afterUrl = enhanceThumbDataUrl(pNew, 360); } catch (e) { afterUrl = null; }
+  return { beforeUrl: beforeUrl, afterUrl: afterUrl, holo: !!holo, lighting: enhInfo.lighting, color: enhInfo.color, detail: enhInfo.detail };
+}
+
 /* Rasio whitening satu patch, tahan silau & latar. Hanya piksel VALID
    (di dalam bentuk kartu, bukan silau) yang dihitung — di pembilang
    maupun penyebut. Piksel kandidat aus harus: terang, pudar, jauh
@@ -3093,7 +3327,7 @@ function notDetectedSide(side, boundsInfo) {
     overall: null, notDetected: true, cardDetected: false, annotations: [],
     evidence: { centering: { leftPx: 0, rightPx: 0, topPx: 0, bottomPx: 0, confidence: 0, estimated: true, quadConf: null }, corners: [], edges: [], surface: { badCells: 0, totalCells: 0, assessedCells: 0, worstEnergy: 0, zones: [] }, bounds: noBounds },
     findings: [{ area: "Card not detected — " + (side === "front" ? "front" : "back"), metric: reason, standard: "Analysis only runs if the card boundary is detected (or a full-frame candidate).", impact: "This side gets no score and is not saved.", severity: "berat", side: side, kind: "centering", estimated: true }],
-    boundsInfo: noBounds,
+    boundsInfo: noBounds, quadChallenge: null,
   };
 }
 function analyzeSide(img, side) {
@@ -3107,6 +3341,62 @@ function analyzeSide(img, side) {
      foto + batas warna latar) — grading tidak pernah terhalang. */
   let detInfo = null;
   try { detInfo = detectCardBoundary(p0, { warp: true, side: side, manual: (typeof cardManualOverrides !== "undefined" ? cardManualOverrides[side] : null) }); } catch (e) { detInfo = null; }
+  /* v27.1f - Quad challenger (F6 dark-photo fix, Option A, revised gate):
+     a second detection on a brightened COPY of p0, accepted only by a
+     geometric shift cap - NO score comparison. The score gate ("clear
+     win", margin 0.03) was NO-GO in Phase 0 (the true quad never wins
+     clearly; the only accepting threshold, ~0.000 at gain 1.6, sits
+     below the noise floor), and scoring would cost ~150 ms of ctxBuild
+     against the T-A5 budget - so scoreQuadOn MUST NOT appear on the
+     production path. Trigger: median luminance < 90 over quadBBox of
+     the first quad. Acceptance: max corner displacement vs the
+     incumbent <= 25 px. Warp and all measurement still come from RAW
+     p0 (the challenger only contributes quad coordinates, via
+     finishDetection route (i)). Any failure falls back to the
+     incumbent; manual overrides skip the whole mechanism. Diagnostics
+     live in quadChallenge (session memory only - never in
+     buildSavePayload). */
+  let quadChallenge = { triggerFired: false, medianBefore: null, quadChallenged: false, quadAccepted: "incumbent", shiftPx: null };
+  const manualOverride = (typeof cardManualOverrides !== "undefined" ? cardManualOverrides[side] : null);
+  if (!manualOverride && detInfo && detInfo.detected && detInfo.corners) {
+    try {
+      /* Fractional det.corners reconstruct with xw (NOT x(w-1)): the
+         old x(w-1) convention shrinks the quad ~1 px at the edges and
+         shifts scores by up to -0.02 (Phase 0, gain-variants §1). */
+      const incPx = detInfo.corners.map((c) => [c[0] * p0.w, c[1] * p0.h]);
+      const bQ = quadBBox(incPx, p0.w, p0.h);
+      /* compensateLighting returns a COPY (p0 untouched) and reports
+         medianBefore in info - the spec trigger value, no extra
+         measuring code. {gainMax: 1.6} alone: every other default
+         (targetMedian 128, gainMin 0.8, kneeLo 170, kneeHi 235, step 4)
+         stays as calibrated for measurement enhancement. */
+      const litRes = compensateLighting(p0, bQ, { gainMax: 1.6 });
+      const medBefore = litRes && litRes.info ? litRes.info.medianBefore : null;
+      quadChallenge.medianBefore = (typeof medBefore === "number" ? Math.round(medBefore * 100) / 100 : null);
+      if (litRes && litRes.info && litRes.info.applied && typeof medBefore === "number" && medBefore < 90) {
+        quadChallenge.triggerFired = true;
+        /* warp:false still returns detected + corners (finishDetection
+           always warps internally, but returns warped:null) and
+           manual:null is valid - the challenger never uses an override. */
+        const detLit = detectCardBoundary(litRes.p, { warp: false, side: side, manual: null });
+        if (detLit && detLit.detected && detLit.corners && detLit.corners.length === 4) {
+          quadChallenge.quadChallenged = true;
+          const chalPx = detLit.corners.map((c) => [c[0] * p0.w, c[1] * p0.h]);
+          const shiftPx = maxQuadShift(incPx, chalPx);
+          quadChallenge.shiftPx = (Number.isFinite(shiftPx) ? Math.round(shiftPx * 10) / 10 : null);
+          if (Number.isFinite(shiftPx) && shiftPx <= 25) {
+            /* Route (i): re-run finishDetection on RAW p0 with the
+               challenger quad - warp from raw p0, never from p0lit.
+               Arguments mirror the internal call of detectCardBoundary:
+               confidence + source label + quadMeta {source, score,
+               refined} taken from the challenger detection. */
+            const detChal = finishDetection(p0, chalPx, detLit.confidence, detLit.publicInfo ? detLit.publicInfo.source : "otomatis", side, true, { source: detLit.publicInfo ? detLit.publicInfo.quadSource : null, score: detLit.publicInfo ? detLit.publicInfo.quadScore : null, refined: detLit.publicInfo ? Boolean(detLit.publicInfo.quadRefined) : false });
+            if (detChal) { detInfo = detChal; quadChallenge.quadAccepted = "challenger"; }
+          }
+        }
+      }
+    } catch (e) { /* Challenger failed - keep the incumbent; grading must never fail. */ }
+  }
   let p = p0, b = findCardBounds(p0), mapBack = null;
   const boundsInfo = detInfo && detInfo.publicInfo
     ? detInfo.publicInfo
@@ -3123,6 +3413,19 @@ function analyzeSide(img, side) {
       return { x: s.x / Math.max(1, p0.w - 1), y: s.y / Math.max(1, p0.h - 1) };
     };
   }
+  /* v27.1 · Capture Enhancement — holo dibaca di warp MENTAH (desain §3.5),
+     lalu tiga langkah murni atas p (desain §3.4: lighting -> color -> detail).
+     p mentah dipertahankan sebagai pRaw hanya untuk thumbnail before; bila
+     enhancement gagal, grading lanjut dengan p mentah. */
+  let holoPre = false;
+  try { holoPre = detectHoloPattern(p, b); } catch (e) { holoPre = false; }
+  let enhanceInfo = null;
+  try {
+    const enhRes = applyCaptureEnhancement(p, b, { holo: holoPre });
+    const pRaw = p;
+    p = enhRes.p;
+    enhanceInfo = makeEnhanceInfo(pRaw, p, enhRes.info, holoPre);
+  } catch (e) { /* enhancement gagal — lanjut dengan p mentah; enhanceInfo tetap null */ }
   /* Konteks ukur (masker bentuk kartu + masker silau + baseline
      border) untuk semua pengukuran di bawah. Di ruang warp masker
      bentuk aktif penuh; di mode fallback (kartu tidak terdeteksi)
@@ -3372,7 +3675,7 @@ function analyzeSide(img, side) {
   const cellEnergies = cellList.map((c) => c.energy);
   const medEnergy = medianOf(cellEnergies);
   const madEnergy = medianOf(cellEnergies.map((e) => Math.abs(e - medEnergy))) * 1.4826;
-  const holo = detectHoloPattern(p, b);
+  const holo = holoPre; /* v27.1: holo from the raw warp (see hook above) */
   /* K6: lantai absolut diturunkan (42->36, holo 56->50) + metrik sensitif
      garis: gradien maksimum per sel (maxGrad) ikut menjadi sinyal
      goresan — goresan tipis yang hilang saat dirata-rata tetap punya
@@ -3542,7 +3845,7 @@ function analyzeSide(img, side) {
         + (holo ? " Holo/foil detected in the image area — surface threshold raised so holo shine is not read as scratches." : "")
         + (surfaceUncertain ? " Part of the surface is Estimated (stains/glare dominate) — the number is uncertain." : ""),
     },
-    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo,
+    annotations: annotations, evidence: evidence, findings: findings, boundsInfo: boundsInfo, enhance: enhanceInfo, quadChallenge: quadChallenge,
   };
 }
 function combineAnalysis(front, back) {
@@ -4126,6 +4429,9 @@ const state = {
   autoDetectError: "",
   autoDetectStatus: "",
   photoSide: "front",
+  /* capture enhancement v27.1 — before/after thumbnails, session only */
+  enhance: null,
+  enhanceView: "after",
   loadingSample: false,
   loadingPhoto: false,
   expandedId: null,
@@ -4135,6 +4441,9 @@ const state = {
   popInput: "", popQuery: "",
   /* report */
   reportSide: "front",
+  /* defect map v27 — selected clickable marker (null = panel closed) */
+  selectedDefectId: null,
+  selectedDefectSide: "front",
 };
 /* ── Draf sesi (sessionStorage) ──
    Draf Grading Digital (foto + sudut manual) disimpan per sesi tab
@@ -4316,6 +4625,304 @@ function annotatedPhotoHtml(url, annotations, alt) {
     : "";
   return '<div><div class="annot-wrap"><img src="' + esc(url) + '" alt="' + esc(alt) + '" />' + dots + "</div>" + legend + "</div>";
 }
+/* ===== v27 · DEFECT MAP — BEGIN ===== */
+/* Defect map v27 — clickable per-category defect markers, built display-time
+   from stored findings/annotations (no grading, threshold, price or E7 change).
+   Marker source = findings (one marker per located finding); annotations are
+   NOT shown raw — they always include a "worst area" even on a clean card.
+   Coordinates are already in raw-photo space (mapBack at grading time), so
+   left = x*100%, top = y*100% maps linearly onto the displayed photo.
+   Surface markers mark the CENTROID of the affected 3x3 zone, not the exact
+   scratch point; centering markers mark the measuring position (card centre),
+   not a defect location. Both are labelled honestly in the detail panel.
+   Click = DOM update only (R1): the handler swaps the detail panel content
+   and aria-pressed in place; a full re-render is only the fallback when the
+   panel element cannot be found (e.g. stale DOM). */
+const DEFECT_CATEGORY_COLOR = { centering: "#2e7d5b", corner: "#cf5138", edge: "#c96a27", surface: "#c39a2b" };
+const DEFECT_CATEGORY_LABEL = { corner: "Corners", edge: "Edges", surface: "Surface", centering: "Centering" };
+const DEFECT_SUBGRADE_KEY = { centering: "centering", corner: "corners", edge: "edges", surface: "surface" };
+const DEFECT_SEVERITY_RANK = { berat: 0, sedang: 1, ringan: 2, baik: 3 };
+const DEFECT_KIND_ORDER = { corner: 0, edge: 1, surface: 2, centering: 3 };
+const DEFECT_KINDS = ["centering", "corner", "edge", "surface"];
+function defectShortLabel(f) {
+  const raw = (typeof f.area === "string" ? f.area : "") || "";
+  let label = raw.split(" — ")[0].replace(/\s+(front|back) side(\s*\(.*\))?\s*$/, "").trim();
+  if (f.kind === "centering") {
+    const m = typeof f.metric === "string" ? f.metric.match(/(\d+\/\d+)[\s\S]*?(\d+\/\d+)/) : null;
+    label = m ? "Centering " + m[1] + " · " + m[2] : "Centering";
+  }
+  return label || raw || f.kind || "";
+}
+function defectCenterExtreme(annotations, side) {
+  /* v27.0-fix: the centering annotation label carries "Centering L/R · T/B".
+     combineAnalysis already treats |ratio-50| > 32 as extreme (line 3761):
+     a side whose centering is that extreme was measured through a bad quad
+     (e.g. the quad traced a sleeve, not the card), so every position derived
+     from that quad is unreliable. Returns false when there is no centering
+     annotation or the label does not parse (fail-open: do not suppress). */
+  const anns = (Array.isArray(annotations) ? annotations : []).filter((a) => a && a.side === side && a.kind === "centering");
+  if (!anns.length) return false;
+  const m = String(anns[0].label || "").match(/(\d+)\/(\d+)[\s\S]*?(\d+)\/(\d+)/);
+  if (!m) return false;
+  return Math.max(Math.abs(Number(m[1]) - 50), Math.abs(Number(m[3]) - 50)) > 32;
+}
+function markerOutsideQuad(x, y, bounds, side) {
+  /* v27.0-fix: true when the point falls outside the stored card outline
+     (detail.bounds[side].corners, TL/TR/BR/BL fractions). The quad is
+     expanded 3% about its centroid: a legitimate edge marker sits ~1.5%
+     inside the border, so it still passes. null = cannot test (no bounds
+     stored — legacy entries): never suppress on this layer. */
+  if (!bounds || typeof bounds !== "object") return null;
+  const b = bounds[side];
+  if (!b || !Array.isArray(b.corners) || b.corners.length !== 4) return null;
+  const c = b.corners;
+  if (!c.every((p) => Array.isArray(p) && typeof p[0] === "number" && typeof p[1] === "number" && isFinite(p[0]) && isFinite(p[1]))) return null;
+  const cx = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4;
+  const cy = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
+  const ex = c.map((p) => [cx + (p[0] - cx) * 1.03, cy + (p[1] - cy) * 1.03]);
+  try { return !pointInQuad([x, y], ex); } catch (e) { return null; }
+}
+function buildDefectMarkers(findings, annotations, side, subgrades, bounds) {
+  const subs = (subgrades && typeof subgrades === "object") ? subgrades : {};
+  const list = Array.isArray(findings) ? findings : [];
+  const anns = Array.isArray(annotations) ? annotations : [];
+  const quadSuspect = defectCenterExtreme(anns, side);
+  /* v27.0-fix: the two centering findings for one side (measured + Estimated)
+     share one point — merge them into ONE marker. The Estimated reading is
+     attached to the marker (estimatedDetail) and shown in the detail panel;
+     it is not a second dot. The findings list keeps both findings. */
+  const merged = [];
+  const centerExtra = new Map();
+  list.forEach((f) => {
+    if (!f || typeof f !== "object") return;
+    if (f.kind !== "centering") { merged.push(f); return; }
+    if (!centerExtra.has(f.side)) {
+      const c = Object.assign({}, f);
+      centerExtra.set(f.side, { primary: c, est: null });
+      merged.push(c);
+    } else {
+      const slot = centerExtra.get(f.side);
+      if (!f.estimated && slot.primary.estimated) {
+        slot.est = { metric: slot.primary.metric, standard: (typeof slot.primary.standard === "string" ? slot.primary.standard : "") };
+        slot.primary.area = f.area; slot.primary.metric = f.metric;
+        slot.primary.standard = f.standard; slot.primary.impact = f.impact;
+        slot.primary.severity = f.severity; slot.primary.estimated = false;
+        slot.primary.x = f.x; slot.primary.y = f.y;
+      } else if (f.estimated && !slot.est) {
+        slot.est = { metric: f.metric, standard: (typeof f.standard === "string" ? f.standard : "") };
+      }
+    }
+  });
+  const out = [];
+  merged.forEach((f, i) => {
+    if (!f || typeof f !== "object") return;
+    if (f.side !== side) return;
+    if (DEFECT_KINDS.indexOf(f.kind) < 0) return;
+    if (typeof f.area !== "string" || !f.area || typeof f.metric !== "string" || !f.metric) return;
+    let x = f.x, y = f.y, fromDerive = false;
+    if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) {
+      const pt = (typeof derivePoint === "function") ? derivePoint(f, anns) : undefined;
+      if (!pt || typeof pt.x !== "number" || typeof pt.y !== "number") return;
+      x = pt.x; y = pt.y; fromDerive = true;
+    }
+    const sev = (f.severity === "berat" || f.severity === "sedang" || f.severity === "ringan" || f.severity === "baik") ? f.severity : "ringan";
+    const subKey = DEFECT_SUBGRADE_KEY[f.kind];
+    const sub = subs[subKey];
+    /* v27.0-fix: a marker whose stored position cannot be trusted is
+       suppressed from the PHOTO (the finding stays in the findings list,
+       the summary and the zoom section). "outsideQuad" = the point falls
+       outside the stored card outline. "quadSuspect" = this side's
+       centering is extreme, so the quad itself was mis-detected and every
+       position from it is unreliable; the centering marker itself is kept
+       — it marks the measurement position. */
+    let suppressed = null;
+    if (markerOutsideQuad(x, y, bounds, side) === true) suppressed = "outsideQuad";
+    else if (f.kind !== "centering" && quadSuspect) suppressed = "quadSuspect";
+    const slot = (f.kind === "centering") ? centerExtra.get(f.side) : null;
+    out.push({
+      id: side + "|" + f.kind + "|" + f.area,
+      x: x, y: y,
+      category: f.kind,
+      label: defectShortLabel(f),
+      severity: sev,
+      subgrade: (typeof sub === "number" && Number.isFinite(sub)) ? sub : null,
+      detail: { area: f.area, metric: f.metric, standard: (typeof f.standard === "string" ? f.standard : ""), impact: (typeof f.impact === "string" ? f.impact : "") },
+      estimatedDetail: (slot && slot.est) ? slot.est : null,
+      side: side,
+      estimated: Boolean(f.estimated) || fromDerive,
+      suppressed: suppressed,
+      findingIndex: i,
+    });
+  });
+  out.sort((a, b) => (DEFECT_SEVERITY_RANK[a.severity] - DEFECT_SEVERITY_RANK[b.severity]) || (DEFECT_KIND_ORDER[a.category] - DEFECT_KIND_ORDER[b.category]) || (a.findingIndex - b.findingIndex));
+  return out;
+}
+function defectDetailPanelHtml(markers, url, side, selectedId) {
+  const m = (Array.isArray(markers) ? markers : []).find((x) => x && x.id === selectedId);
+  if (!m) return "";
+  const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.ringan;
+  const subLabel = DEFECT_CATEGORY_LABEL[m.category] || m.category;
+  const zoomItem = { area: m.detail.area, metric: m.detail.metric, severity: m.severity, side: m.side, kind: m.category, x: m.x, y: m.y, zoom: ZOOM_FOR_KIND[m.category] || 3, estimated: m.estimated };
+  const note = m.category === "surface"
+    ? "Zone marker — the center of the affected zone, not the exact scratch point."
+    : (m.category === "centering" ? "Centering measuring position — the card's center, not a defect location." : "");
+  return '<div id="defectDetailPanel" class="slab-frame" aria-live="polite" style="margin-top:0.75rem;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem">' +
+    '<div class="row-wrap" style="justify-content:space-between"><span class="chip" style="' + sev.chip + '">' + sev.label + '</span>' +
+    '<button type="button" data-action="defect-marker" data-marker-id="' + esc(m.id) + '" data-side="' + esc(m.side) + '" aria-label="Close defect detail" style="border:0;background:transparent;color:var(--dim);font-size:13px;font-weight:700;cursor:pointer;padding:0.25rem 0.5rem">× Close detail</button></div>' +
+    '<p class="fd" style="font-size:15px;font-weight:700;line-height:1.3;margin:0.5rem 0 0">' + esc(capFirst(translateLegacyText(m.detail.area))) + '</p>' +
+    '<p style="margin:0.375rem 0 0;font-size:14px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.detail.metric))) + '</p>' +
+    (m.detail.standard ? '<p class="dim" style="margin:0.25rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.detail.standard))) + '</p>' : "") +
+    (m.detail.impact ? '<p style="margin:0.25rem 0 0;font-size:13px;font-weight:600;line-height:1.6;color:var(--gold-deep)">' + esc(capFirst(translateLegacyText(m.detail.impact))) + '</p>' : "") +
+    (m.estimatedDetail && m.estimatedDetail.metric ? '<p class="dim" style="margin:0.25rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText("Estimated reading — " + m.estimatedDetail.metric))) + '</p>' : "") +
+    '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(m.estimated ? "Estimated position" : "Measured point"))) + (typeof m.subgrade === "number" ? " · " + esc(capFirst(translateLegacyText(subLabel.toLowerCase() + " subgrade: " + m.subgrade.toFixed(1)))) : "") + '</p>' +
+    (note ? '<p class="dim" style="margin:0.25rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(note))) + '</p>' : "") +
+    '<div style="margin-top:0.75rem">' + zoomCardHtml(zoomItem, url) + '</div></div>';
+}
+function defectMapHtml(url, markers, side, selectedId, alt) {
+  const list = Array.isArray(markers) ? markers : [];
+  /* v27.0-fix: photo visibility is decided HERE, and only here. The findings
+     list, the per-category summary and the zoom section keep showing every
+     finding — only the dots on the photo are filtered:
+     (a) Minor (ringan) and Good (baik) findings are never dotted — user
+         decision 2026-11-15: only Moderate/Severe markers appear on the
+         photo; (b) markers flagged suppressed by buildDefectMarkers
+         (position outside the stored card outline, or from a quad that
+         looks mis-detected) are never dotted either. Both cases are
+         labelled honestly under the photo instead of vanishing silently. */
+  const suppressed = list.filter((m) => m && m.suppressed);
+  const candidates = list.filter((m) => m && !m.suppressed);
+  const visible = candidates.filter((m) => m.severity === "sedang" || m.severity === "berat");
+  const hiddenMinor = candidates.filter((m) => m.severity !== "sedang" && m.severity !== "berat");
+  const dots = visible.map((m, i) => {
+    const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.ringan;
+    const aria = m.label + ", " + sev.label.toLowerCase() + " defect, marker " + (i + 1) + (m.estimated ? ", estimated position" : "");
+    return '<button type="button" class="annot-dot defect-marker" data-action="defect-marker" data-marker-id="' + esc(m.id) + '" data-side="' + esc(side) + '" aria-label="' + esc(capFirst(translateLegacyText(aria))) + '" aria-pressed="' + (m.id === selectedId) + '" style="left:' + (m.x * 100) + '%;top:' + (m.y * 100) + '%;background:' + (DEFECT_CATEGORY_COLOR[m.category] || "#cf5138") + '">' + (i + 1) + '</button>';
+  }).join("");
+  const groups = ["corner", "edge", "surface", "centering"].map((k) => ({ kind: k, items: visible.filter((m) => m.category === k) })).filter((g) => g.items.length > 0);
+  const notes = [];
+  const outQ = suppressed.filter((m) => m.suppressed === "outsideQuad");
+  if (outQ.length > 0) notes.push(outQ.length === 1 ? "1 marker not shown — its position falls outside the detected card outline." : outQ.length + " markers not shown — their positions fall outside the detected card outline.");
+  const susQ = suppressed.filter((m) => m.suppressed === "quadSuspect");
+  if (susQ.length > 0) notes.push(susQ.length === 1 ? "1 marker not shown — this side's card outline looks unreliable, so its position can't be trusted." : susQ.length + " markers not shown — this side's card outline looks unreliable, so their positions can't be trusted.");
+  if (hiddenMinor.length > 0) notes.push(hiddenMinor.length === 1 ? "1 minor finding is listed below, not marked on the photo." : hiddenMinor.length + " minor findings are listed below, not marked on the photo.");
+  const legend = (visible.length === 0 && notes.length === 0)
+    ? '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText("No defects marked on this side."))) + '</p>'
+    : '<div style="margin-top:0.5rem">' + groups.map((g) => {
+        const head = DEFECT_CATEGORY_LABEL[g.kind] + " (" + g.items.length + ")";
+        const items = g.items.map((m) => {
+          const n = visible.indexOf(m) + 1;
+          const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.ringan;
+          const text = n + " — " + capFirst(m.label) + " · " + sev.label + (m.estimated ? " (Estimated)" : "");
+          return '<li class="dim" style="font-size:12px">' + esc(capFirst(translateLegacyText(text))) + '</li>';
+        }).join("");
+        return '<p class="fd" style="font-size:12px;font-weight:700;margin:0.5rem 0 0.125rem">' + esc(capFirst(translateLegacyText(head))) + '</p><ul style="list-style:none;margin:0;padding:0" class="stack">' + items + '</ul>';
+      }).join("") + notes.map((t) => '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText(t))) + '</p>').join("") + '</div>';
+  return '<div class="defect-map" data-side="' + esc(side) + '" data-photo-url="' + esc(url) + '" data-markers="' + esc(JSON.stringify(visible)) + '">' +
+    '<div class="annot-wrap"><img src="' + esc(url) + '" alt="' + esc(alt) + '" />' + dots + '</div>' +
+    '<div class="defect-detail-panel" aria-live="polite">' + defectDetailPanelHtml(visible, url, side, selectedId) + '</div>' +
+    legend + '</div>';
+}
+function defectSummaryHtml(markers) {
+  const list = Array.isArray(markers) ? markers : [];
+  if (list.length === 0) {
+    return '<p style="border:1px solid #2e7d5b;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem;font-size:14px;line-height:1.6;margin:0">' +
+      '<span style="font-weight:700;color:#0e9f6e">' + esc(capFirst(translateLegacyText("No defects found — every checked area is in the 9.5+ band."))) + '</span></p>';
+  }
+  const rows = ["corner", "edge", "surface", "centering"].map((k) => {
+    const items = list.filter((m) => m.category === k);
+    if (items.length === 0) return "";
+    const counts = [["berat", "severe"], ["sedang", "moderate"], ["ringan", "minor"], ["baik", "good"]].map((pair) => {
+      const n = items.filter((m) => m.severity === pair[0]).length;
+      return n > 0 ? n + " " + pair[1] : "";
+    }).filter(Boolean).join(", ");
+    const worst = items.slice().sort((a, b) => DEFECT_SEVERITY_RANK[a.severity] - DEFECT_SEVERITY_RANK[b.severity])[0];
+    const text = DEFECT_CATEGORY_LABEL[k] + " — " + items.length + (items.length === 1 ? " defect" : " defects") + (counts ? " (" + counts + ")" : "") + ", worst: " + worst.label;
+    return '<p class="dim" style="margin:0.25rem 0 0;font-size:13px;line-height:1.6">' + esc(capFirst(translateLegacyText(text))) + '</p>';
+  }).join("");
+  return '<div class="defect-summary">' + rows + '</div>';
+}
+function updateDefectDetailPanel(target) {
+  if (!target || typeof target.closest !== "function") return false;
+  const wrap = target.closest(".defect-map");
+  if (!wrap) return false;
+  const panel = wrap.querySelector(".defect-detail-panel");
+  if (!panel) return false;
+  let markers = [];
+  try { markers = JSON.parse(wrap.getAttribute("data-markers") || "[]"); } catch (e) { return false; }
+  const url = wrap.getAttribute("data-photo-url") || "";
+  const side = wrap.getAttribute("data-side") || "front";
+  const dots = wrap.querySelectorAll(".defect-marker");
+  if (dots && typeof dots.forEach === "function") {
+    dots.forEach((b) => {
+      if (b && typeof b.setAttribute === "function") b.setAttribute("aria-pressed", String(state.selectedDefectId != null && b.getAttribute("data-marker-id") === state.selectedDefectId));
+    });
+  }
+  panel.innerHTML = defectDetailPanelHtml(markers, url, side, state.selectedDefectId);
+  return true;
+}
+function handleDefectMarkerClick(target) {
+  const id = target.getAttribute("data-marker-id");
+  const side = target.getAttribute("data-side");
+  state.selectedDefectId = (state.selectedDefectId === id) ? null : id;
+  state.selectedDefectSide = side;
+  if (!updateDefectDetailPanel(target)) {
+    if (typeof document !== "undefined" && document.getElementById("reportRoot") && !document.getElementById("reportRoot").classList.contains("hidden")) {
+      const raw = new URLSearchParams(window.location.search).get("report");
+      if (raw) {
+        /* v27.0-fix: the fallback re-render scrolls to the top (renderReport
+           line 6959) — restore the scroll position once it finishes. */
+        const y = (typeof window !== "undefined") ? window.scrollY : 0;
+        const p = renderReport(raw);
+        if (p && typeof p.then === "function") p.then(() => { try { window.scrollTo(0, y); } catch (err) {} });
+      }
+    } else if (typeof renderTab === "function") {
+      renderTab();
+    }
+  }
+}
+function handleReportSideClick(target) {
+  /* v27.0-fix (item 3): switching the report FRONT/BACK photo tab used to
+     call renderReport() — a full re-render whose first line is
+     window.scrollTo(0, 0) — throwing the page back to the top. Swap only
+     the photo map in place instead; the rest of the report is untouched
+     and the scroll position never moves. Fallback: full re-render with
+     the scroll position restored afterwards. */
+  const side = target.getAttribute("data-side");
+  if (side !== "front" && side !== "back") return;
+  state.reportSide = side;
+  state.selectedDefectSide = side;
+  const root = (typeof document !== "undefined") ? document.getElementById("reportRoot") : null;
+  const section = root ? root.querySelector('section[aria-label="Photo of the card with defect markers"]') : null;
+  const oldMap = section ? section.querySelector(".defect-map") : null;
+  let markers = null, url = "";
+  try {
+    if (section) {
+      markers = JSON.parse(section.getAttribute(side === "front" ? "data-front-markers" : "data-back-markers") || "null");
+      url = section.getAttribute(side === "front" ? "data-front-url" : "data-back-url") || "";
+    }
+  } catch (err) { markers = null; }
+  if (section && oldMap && Array.isArray(markers) && url) {
+    oldMap.outerHTML = defectMapHtml(url, markers, side, state.selectedDefectId, side + " photo of the card with defect markers");
+    const tabs = section.querySelectorAll('[data-action="report-side"]');
+    if (tabs && typeof tabs.forEach === "function") {
+      tabs.forEach((b) => {
+        const active = b.getAttribute("data-side") === side;
+        b.setAttribute("aria-selected", String(active));
+        b.style.background = active ? "#f5f5f2" : "var(--surface2)";
+        b.style.color = active ? "#0a0a0b" : "var(--dim)";
+      });
+    }
+    return;
+  }
+  const y = (typeof window !== "undefined") ? window.scrollY : 0;
+  const raw = new URLSearchParams(window.location.search).get("report");
+  if (raw) {
+    const p = renderReport(raw);
+    if (p && typeof p.then === "function") p.then(() => { try { window.scrollTo(0, y); } catch (err) {} });
+  }
+}
+/* ===== v27 · DEFECT MAP — END ===== */
+
 /* ================= DETEKSI KARTU — TAMPILAN =================
    Overlay garis batas + 4 titik sudut di atas foto, label keyakinan,
    dan ringkasan bagian kartu yang dikenali. Dipakai di tahap upload
@@ -5793,6 +6400,7 @@ async function runAnalysis(isSample) {
   state.gStage = "scanning";
   state.detectError = "";
   state.photoSide = "front";
+  state.enhance = null; state.enhanceView = "after"; state.quadChallenge = null;
   state.scanStep = 0;
   renderTab();
   const scanEl = document.getElementById("scanSteps");
@@ -5856,6 +6464,9 @@ async function runAnalysis(isSample) {
   state.det = detection;
   state.values = vals;
   state.analysis = combined;
+  state.enhance = { front: fa ? fa.enhance : null, back: ba ? ba.enhance : null };
+  state.quadChallenge = { front: fa ? fa.quadChallenge : null, back: ba ? ba.quadChallenge : null };
+  state.enhanceView = "after";
   state.dirty = false;
   /* K2 — TUNDA PERSIST: hasil dihitung + ditampilkan sebagai DRAF LOKAL
      dulu; TIDAK ada baris Supabase yang dibuat di sini. Persist hanya
@@ -5943,6 +6554,7 @@ function resetGrading() {
   state.autoDet = null; state.autoValues = null; state.autoDetectError = ""; state.autoDetecting = false; state.autoDetectStatus = "";
   state.priceStale = false; state.identityConfirmed = false; state.pendingPersist = false; state.correctionErrors = []; state.saveBlockedReason = "";
   state.detectError = ""; state.photoSide = "front";
+  state.enhance = null; state.enhanceView = "after"; state.quadChallenge = null;
   state._sampleLoaded = false;
   /* Reset berarti mulai bersih — draf sesi ikut dibuang agar tidak
      bangkit lagi saat halaman Grading dibuka kembali. */
@@ -6102,6 +6714,37 @@ function renderGrading() {
   html += "</section>";
   return html;
 }
+/* v27.1g - Quad-check diagnostic lines (F6 T-A4): session-only rendering
+   of state.quadChallenge, set once per run in runAnalysis (staged line
+   6455). Reads NOTHING persisted: history (historyCardHtml) and the QR
+   report (renderReport) build from the saved pg.detail row, which never
+   contains quadChallenge because buildSavePayload never copies it. A side
+   with no diagnostics renders no line at all - never "not available". */
+function quadCheckLine(side, qc) {
+  if (!qc || typeof qc !== "object") return "";
+  const sideWord = side === "back" ? "back" : "front";
+  const label = "Quad check (" + sideWord + "): ";
+  if (typeof qc.medianBefore !== "number") return label + "skipped — manual correction active.";
+  const med = Math.round(qc.medianBefore);
+  if (!qc.triggerFired) return label + "not triggered — median brightness " + med + ".";
+  const shift = (typeof qc.shiftPx === "number" && isFinite(qc.shiftPx))
+    ? (Number.isInteger(qc.shiftPx) ? String(qc.shiftPx) : qc.shiftPx.toFixed(1))
+    : null;
+  if (qc.quadAccepted === "challenger") return label + "triggered (median " + med + ") — challenger accepted, shift " + shift + " px.";
+  if (qc.quadChallenged && shift !== null && qc.shiftPx > 25) return label + "triggered (median " + med + ") — challenger rejected, shift " + shift + " px exceeds 25 px cap.";
+  if (qc.quadChallenged && shift !== null) return label + "triggered (median " + med + ") — challenger rejected, shift " + shift + " px (warp failed), incumbent kept.";
+  return label + "triggered (median " + med + ") — challenger not found, incumbent kept.";
+}
+function quadCheckHtml() {
+  const qc = (typeof state !== "undefined" && state) ? state.quadChallenge : null;
+  if (!qc || typeof qc !== "object") return "";
+  const lines = [quadCheckLine("front", qc.front), quadCheckLine("back", qc.back)].filter(Boolean);
+  if (!lines.length) return "";
+  return '<div class="slab-frame" style="border-radius:1rem;background:var(--surface);padding:0.75rem 0.875rem">' +
+    '<p class="fd" style="font-size:15px;font-weight:700">Quad check</p>' +
+    lines.map((l) => '<p class="dim" style="margin:0.375rem 0 0;font-size:13px;line-height:1.6">' + esc(l) + "</p>").join("") +
+    "</div>";
+}
 function renderResultHtml() {
   const det = state.det, a = state.analysis, values = state.values;
   const ev = a.evidence;
@@ -6203,6 +6846,8 @@ function renderResultHtml() {
     html += cardDetectPanelHtml(a.bounds.front, a.bounds.back, state.front ? state.front.url : null, state.back ? state.back.url : null, false);
   }
   /* Subgrade + foto bertanda */
+  const markersFrontResult = buildDefectMarkers(a.findings, a.annotations, "front", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score }, a.bounds);
+  const markersBackResult = buildDefectMarkers(a.findings, a.annotations, "back", { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score }, a.bounds);
   html += '<div><h3 class="fd" style="font-size:18px;font-weight:700">Condition analysis from photos</h3>' +
     '<p class="dim" style="margin-top:0.125rem;font-size:12px">Each subgrade comes with its pixel measurement evidence, scored against the Analysis Standard threshold bands.</p>' +
     '<div class="mt2" style="display:grid;gap:0.75rem" id="subGrid">' +
@@ -6215,9 +6860,32 @@ function renderResultHtml() {
     '<button type="button" role="tab" data-action="photo-side" data-side="front" aria-selected="' + (state.photoSide === "front") + '" class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (state.photoSide === "front" ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + '">Front photo</button>' +
     '<button type="button" role="tab" data-action="photo-side" data-side="back" aria-selected="' + (state.photoSide === "back") + '" ' + (!state.back ? "disabled" : "") + ' class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (state.photoSide === "back" ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + (!state.back ? ";opacity:0.4" : "") + '">Back photo</button></div>' +
     '<div style="margin:0 auto;max-width:24rem">' +
-    (state.photoSide === "front" && state.front ? annotatedPhotoHtml(state.front.url, a.annotations.filter((x) => x.side === "front"), "Front photo of card with problem markers") : "") +
-    (state.photoSide === "back" && state.back ? annotatedPhotoHtml(state.back.url, a.annotations.filter((x) => x.side === "back"), "Back photo of card with problem markers") : "") +
+    (state.photoSide === "front" && state.front ? defectMapHtml(state.front.url, markersFrontResult, "front", state.selectedDefectId, "Front photo of card with defect markers") : "") +
+    (state.photoSide === "back" && state.back ? defectMapHtml(state.back.url, markersBackResult, "back", state.selectedDefectId, "Back photo of card with defect markers") : "") +
     "</div></div></div>";
+  /* v27.1 · Capture Enhancement — before/after comparison (warp only, no
+     markers: marker coordinates live in raw-photo space, so they must never
+     be drawn over the straightened image). Shown only when this side has
+     enhance info from a fresh grading. */
+  (function () {
+    const enh = state.enhance ? state.enhance[state.photoSide] : null;
+    if (!enh || (!enh.beforeUrl && !enh.afterUrl)) return;
+    const view = state.enhanceView === "before" ? "before" : "after";
+    const url = view === "before" ? (enh.beforeUrl || enh.afterUrl) : (enh.afterUrl || enh.beforeUrl);
+    const sideWord = state.photoSide === "back" ? "back" : "front";
+    const altText = "Straightened " + sideWord + " photo, " + view + " view";
+    const tabBtn = function (v, label) {
+      const on = view === v;
+      return '<button type="button" role="tab" data-action="enhance-view" data-view="' + v + '" aria-selected="' + on + '" class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (on ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + '">' + esc(capFirst(translateLegacyText(label))) + '</button>';
+    };
+    html += '<div class="slab-frame" style="border-radius:1rem;background:var(--surface);padding:0.75rem 0.875rem">' +
+      '<p class="fd" style="font-size:15px;font-weight:700">' + esc(capFirst(translateLegacyText("capture enhancement — before / after"))) + '</p>' +
+      '<div style="display:flex;gap:0.5rem" role="tablist" aria-label="Compare straightened photo">' + tabBtn("before", "Original") + tabBtn("after", "Enhanced") + '</div>' +
+      '<div style="margin:0.5rem auto 0;max-width:24rem"><img src="' + esc(url) + '" alt="' + esc(capFirst(translateLegacyText(altText))) + '" style="width:100%;border-radius:0.5rem;display:block" /></div>' +
+      '<p class="dim" style="font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText("The enhanced view sharpens detail already in the photo so faint scratches and edge wear read more clearly. It does not add detail beyond what the camera captured."))) + '</p></div>';
+  })();
+  html += quadCheckHtml();
+  html += defectSummaryHtml(markersFrontResult.concat(markersBackResult));
   /* Temuan */
   html += '<div><p class="kicker">[ Temuan per Area ]</p><h3 class="fd" style="margin-top:0.25rem;font-size:18px;font-weight:700">Which parts are not so good?</h3>' +
     '<p class="dim" style="margin:0.125rem 0 0.625rem;font-size:12px;line-height:1.6">Each finding names its area, its measurement, the Analysis Standard band it hits, and its impact on the subgrade — ordered from the most value-reducing first.</p>' +
@@ -6321,7 +6989,7 @@ function historyCardHtml(pg) {
     '<span class="dim" style="display:block;margin-top:0.125rem;font-size:12px">' + (pg.hasEstimate ? "Estimate " + fmtIDR(pg.valueAtGrade) : "No estimate yet") + (pg.confidence > 0 ? " · detection " + pg.confidence + "%" : "") + "</span></span></button>";
   if (expanded) {
     const ev = detail.evidence;
-    const frontAnnotations = (detail.annotations || []).filter((x) => x.side === "front");
+    const markersFrontHist = buildDefectMarkers(detail.findings, detail.annotations, "front", { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }, detail.bounds);
     html += '<div class="stack" style="border-top:1px solid var(--border);padding:0.75rem">' +
       '<div style="display:grid;gap:0.75rem" id="histSub-' + esc(String(pg.id)) + '">' +
       subgradeCardHtml({ title: "CENTERING", score: pg.centering, reason: translateLegacyText((detail.reasons || {}).centering), extra: detail.centeringDetail ? "Left–right " + detail.centeringDetail.lrText + " · Top–bottom " + detail.centeringDetail.tbText : undefined, detail: evidenceDetail("centering", ev) }) +
@@ -6330,7 +6998,7 @@ function historyCardHtml(pg) {
       subgradeCardHtml({ title: "SURFACE", score: pg.surface, reason: translateLegacyText((detail.reasons || {}).surface), detail: evidenceDetail("surface", ev) }) +
       "</div><style>@media (min-width:640px){[id^=\"histSub-\"]{grid-template-columns:1fr 1fr}}</style>";
     if (detail.findings) {
-      html += '<div><p class="fc" style="margin:0 0 0.5rem;font-size:11px;font-weight:600;letter-spacing:0.24em;text-transform:uppercase;color:var(--gold-deep)">Findings per area</p>' + findingsListHtml(detail.findings, true) + "</div>";
+      html += '<div><p class="fc" style="margin:0 0 0.5rem;font-size:11px;font-weight:600;letter-spacing:0.24em;text-transform:uppercase;color:var(--gold-deep)">Findings per area</p>' + findingsListHtml(detail.findings, true) + "</div>" + defectSummaryHtml(markersFrontHist);
     }
     if (detail.photoQuality && (detail.photoQuality.front || detail.photoQuality.back)) {
       const pq = detail.photoQuality;
@@ -6340,7 +7008,7 @@ function historyCardHtml(pg) {
       html += '<p class="fm dim" style="font-size:11.5px;line-height:1.6;margin:0">Measurement evidence — ' + esc(boundsEvidenceText(detail.bounds.front, detail.bounds.back)) + "</p>";
     }
     if (pg.frontUrl) {
-      html += '<div style="margin:0 auto;max-width:20rem;width:100%">' + annotatedPhotoHtml(pg.frontUrl, frontAnnotations, "Front photo saved with markers") + "</div>";
+      html += '<div style="margin:0 auto;max-width:20rem;width:100%">' + defectMapHtml(pg.frontUrl, markersFrontHist, "front", state.selectedDefectId, "Front photo saved with defect markers") + "</div>";
     }
     if (pg.photoUploadFailed) html += '<p role="alert" style="font-size:12px;line-height:1.6;margin:0;color:#e0684f">Photo failed to save to the archive during grading — grading is saved, but the photo won\'t appear here/report.</p>';
     html += '<p class="dim" style="font-size:12px;margin:0">Raw ' + fmtIDR(pg.valueRaw) + " · Grade 9 " + fmtIDR(pg.valueGrade9) + " · Grade 10 " + fmtIDR(pg.valueGrade10) + (detail.basis ? " — " + esc(translateLegacyText(detail.basis)) : "") + "</p>";
@@ -6511,6 +7179,7 @@ function derivePoint(f, annotations) {
 function buildZoomItems(findings, annotations) {
   const items = [];
   const used = new Set();
+  const seenCenter = new Set();
   (Array.isArray(findings) ? findings : []).forEach((f, i) => {
     if (!f || typeof f !== "object") return;
     const estimated = f.x == null || f.y == null;
@@ -6520,6 +7189,14 @@ function buildZoomItems(findings, annotations) {
       if (pt) { x = pt.x; y = pt.y; }
     }
     if (x == null || y == null) return;
+    /* v27.0-fix: the two centering findings for one side (measured +
+       Estimated) share one point — one zoom card, not two identical ones.
+       The first one wins (measured is pushed before Estimated). */
+    if (f.kind === "centering") {
+      const ck = f.side + "|" + Math.round(x * 40) + "-" + Math.round(y * 40);
+      if (seenCenter.has(ck)) return;
+      seenCenter.add(ck);
+    }
     const key = f.side + "-" + f.kind + "-" + Math.round(x * 40) + "-" + Math.round(y * 40) + "-" + i;
     if (used.has(key)) return;
     used.add(key);
@@ -6579,6 +7256,7 @@ async function renderReport(id) {
   const findings = Array.isArray(detail.findings) ? detail.findings.filter((f) => f && typeof f === "object") : [];
   const annotations = Array.isArray(detail.annotations) ? detail.annotations.filter((a) => a && typeof a === "object") : [];
   const zoomItems = buildZoomItems(findings, annotations).filter((z) => (z.side === "front" ? Boolean(pg.frontUrl) : Boolean(pg.backUrl)));
+  const allMarkers = ["front", "back"].flatMap((s) => buildDefectMarkers(findings, annotations, s, { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface }, detail.bounds));
   const subs = REPORT_SUBS.map((s) => ({ key: s.key, label: s.label, score: pg[s.key] })).sort((a, b2) => a.score - b2.score);
   const weakest = subs.filter((s) => s.score < 9.5);
   const berat = findings.filter((f) => f.severity === "berat").length;
@@ -6614,6 +7292,7 @@ async function renderReport(id) {
     html += '<p class="dim" style="margin-top:0.5rem;font-size:14px;line-height:1.65">Grade ' + fmtScore(pg.overall) + ' is most dragged down by <strong style="color:var(--text)">' +
       weakest.slice(0, 2).map((s) => s.label + " (" + s.score.toFixed(1) + ")").join(" and ") +
       "</strong>. " + findings.length + " findings in total" + (berat > 0 ? ", " + berat + " severe" : "") + (sedang > 0 ? " and " + sedang + " moderate" : "") + " — area-by-area detail below, with measurement numbers and marked photos.</p>" +
+      defectSummaryHtml(allMarkers) +
       '<div class="mt3 stack" style="gap:0.5rem">' + subs.map((s) =>
         '<div style="display:flex;align-items:center;gap:0.5rem;font-size:12px"><span class="fc" style="width:86px;flex-shrink:0;font-weight:600;letter-spacing:0.12em;text-transform:uppercase">' + s.label + '</span><div class="subbar" style="flex:1;margin:0"><div style="width:' + (s.score * 10) + "%;background:" + gradeColor(s.score) + '"></div></div><span class="fd" style="width:2rem;flex-shrink:0;text-align:right;font-size:14px;font-weight:900;color:' + gradeColor(s.score) + '">' + s.score.toFixed(1) + "</span></div>"
       ).join("") + "</div>";
@@ -6641,14 +7320,17 @@ async function renderReport(id) {
     /* Bukti foto */
     const side = state.reportSide === "back" && pg.backUrl ? "back" : "front";
     const sideUrl = side === "front" ? pg.frontUrl : pg.backUrl;
-    html += '<section aria-label="Photo of the card with defect markers"><p class="kicker">[ Photo Evidence ]</p>' +
+    html += '<section aria-label="Photo of the card with defect markers"' +
+      ' data-front-url="' + esc(pg.frontUrl || "") + '" data-back-url="' + esc(pg.backUrl || "") + '"' +
+      ' data-front-markers="' + esc(JSON.stringify(allMarkers.filter((m) => m.side === "front"))) + '"' +
+      ' data-back-markers="' + esc(JSON.stringify(allMarkers.filter((m) => m.side === "back"))) + '">' + '<p class="kicker">[ Photo Evidence ]</p>' +
       '<h2 class="fd" style="margin-top:0.25rem;font-size:22px;font-weight:900;line-height:1.25">Where the defects are in the photo</h2>' +
-      '<p class="dim" style="margin:0.25rem 0 0.625rem;font-size:13px;line-height:1.65">Red marker = the worst area on that side; green marker = centering measurement position. The numbers match the caption under the photo.</p>' +
+      '<p class="dim" style="margin:0.25rem 0 0.625rem;font-size:13px;line-height:1.65">Tap a marker to see that defect\'s measurement.</p>' +
       '<div style="margin-bottom:0.5rem;display:flex;gap:0.5rem" role="tablist" aria-label="Choose photo side">' +
       '<button type="button" role="tab" data-action="report-side" data-side="front" aria-selected="' + (side === "front") + '" class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (side === "front" ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + '">Front photo</button>' +
       '<button type="button" role="tab" data-action="report-side" data-side="back" aria-selected="' + (side === "back") + '" ' + (!pg.backUrl ? "disabled" : "") + ' class="fc" style="border-radius:0.375rem;border:0;padding:0.375rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;' + (side === "back" ? "background:#f5f5f2;color:#0a0a0b" : "background:var(--surface2);color:var(--dim)") + (!pg.backUrl ? ";opacity:0.4" : "") + '">Back photo</button></div>' +
       '<div style="margin:0 auto;max-width:24rem">' +
-      (sideUrl ? annotatedPhotoHtml(sideUrl, annotations.filter((x) => x.side === side), "" + (side === "front" ? "front" : "back") + " photo of the card with problem-area markers")
+      (sideUrl ? defectMapHtml(sideUrl, allMarkers.filter((m) => m.side === side), side, state.selectedDefectId, "" + (side === "front" ? "front" : "back") + " photo of the card with defect markers")
         : '<p class="dim" style="border:1px dashed var(--border);border-radius:0.75rem;padding:1rem;text-align:center;font-size:14px">' + (pg.photoUploadFailed ? "This side's photo failed to save to the archive during grading." : "This side's photo wasn't saved.") + "</p>") +
       "</div></section>";
   }
@@ -7086,6 +7768,9 @@ document.addEventListener("click", (e) => {
   } else if (action === "photo-side") {
     state.photoSide = target.getAttribute("data-side");
     renderTab();
+  } else if (action === "enhance-view") {
+    state.enhanceView = target.getAttribute("data-view") === "before" ? "before" : "after";
+    renderTab();
   } else if (action === "confirm-identity") {
     /* E1: konfirmasi eksplisit identitas hasil deteksi — membuka gate
        persist K2 (bahkan bila flag masih ada: user menerima dengan sadar,
@@ -7144,9 +7829,9 @@ document.addEventListener("click", (e) => {
   } else if (action === "close-report") {
     closeReport();
   } else if (action === "report-side") {
-    state.reportSide = target.getAttribute("data-side");
-    const raw = new URLSearchParams(window.location.search).get("report");
-    if (raw) void renderReport(raw);
+    handleReportSideClick(target);
+  } else if (action === "defect-marker") {
+    handleDefectMarkerClick(target);
   } else if (action === "toggle-history") {
     const id = target.getAttribute("data-id");
     state.expandedId = String(state.expandedId) === String(id) ? null : id;
