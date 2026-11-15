@@ -4427,6 +4427,325 @@ function popForCard(rows, det, overall) {
    overall, valueRaw, valueGrade9, valueGrade10, valueAtGrade, pop,
    showSnapshot }. Missing measurements render as "not available" — old
    entries predate these checks and are never backfilled by guessing. */
+/* ═══ v27.7 · MARKET DATA — compact card ═══
+   Live market prices come from the Supabase Edge Function "market-prices"
+   (same anon-key pattern as detect-card: SB_KEYS, publishable first,
+   legacy JWT fallback on 401/403). The function is NOT deployed yet —
+   until it is, every call fails and the UI falls back to the stored TEG
+   estimate snapshot plus an honest "not collected" line. Nothing here
+   invents a price: a source with no number renders "not available",
+   never 0. The Financial ladder stays TEG estimates (valueAtGrade) and
+   is never replaced by upstream numbers; graded prices from other
+   companies are never shown as TEG grades. */
+/* Identity key a market snapshot was fetched for (name + set + number,
+   lowercased) — buildSavePayload only stores a snapshot whose key still
+   matches the identity being saved. */
+function marketSnapshotKeyFor(det) {
+  const d = det || {};
+  return [d.cardName, d.setName, d.cardNumber].map((x) => String(x || "").trim().toLowerCase()).join("|");
+}
+function marketCategoryFor(det) {
+  const c = String((det && det.category) || "").toLowerCase();  if (c.indexOf("pokemon") >= 0 || c.indexOf("pokémon") >= 0) return "pokemon";
+  if (c.indexOf("magic") >= 0) return "magic";
+  if (c.indexOf("yu-gi") >= 0 || c.indexOf("yugioh") >= 0 || c.indexOf("yu gi") >= 0) return "yugioh";
+  if (c.indexOf("one piece") >= 0) return "onepiece";
+  return "other";
+}
+function marketSearchQuery(det) {
+  const d = det || {};
+  return [d.cardName, d.setName, d.cardNumber].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
+}
+function marketOutboundUrls(det) {
+  const q = encodeURIComponent(marketSearchQuery(det));
+  return {
+    ebay: "https://www.ebay.com/sch/i.html?_nkw=" + q,
+    /* Facebook Marketplace search URL — format from the v27.7 research;
+       not yet verified live in a browser (no live check in this build). */
+    facebook: "https://www.facebook.com/marketplace/search/?query=" + q,
+  };
+}
+/* A price is usable only when it is a finite number above zero — a
+   missing price stays null and renders "not available", never Rp 0. */
+function marketNum(v) {
+  const n = Number(v);
+  return (Number.isFinite(n) && n > 0) ? n : null;
+}
+function marketFxRate(m, cur) {
+  if (m && m.fx) {
+    const r = marketNum(m.fx[cur + "_IDR"]);
+    if (r !== null) return r;
+  }
+  if (cur === "USD") return 16500; /* same fallback as the price estimator */
+  return null;
+}
+function marketToIDR(amount, currency, m) {
+  const a = marketNum(amount);
+  if (a === null) return null;
+  const cur = String(currency || "USD").toUpperCase();
+  if (cur === "IDR") return Math.round(a);
+  const rate = marketFxRate(m, cur);
+  return rate ? Math.round(a * rate) : null;
+}
+function marketMoneyHtml(amount, currency, m) {
+  const a = marketNum(amount);
+  if (a === null) return "not available";
+  const cur = String(currency || "USD").toUpperCase();
+  const idr = marketToIDR(a, cur, m);
+  const orig = cur + " " + a.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (idr !== null) return fmtIDR(idr) + ' <span class="dim">(' + esc(orig) + ")</span>";
+  return esc(orig);
+}
+/* Whitelist the function response into the snapshot shape the UI reads.
+   Unknown fields are dropped; non-numeric prices become null. */
+function sanitizeMarketSnapshot(j) {
+  if (!j || typeof j !== "object") return null;
+  const src = (j.sources && typeof j.sources === "object") ? j.sources : {};
+  const pickNums = (o, keys) => {
+    if (!o || typeof o !== "object") return null;
+    const out = {};
+    let any = false;
+    keys.forEach((k) => { const n = marketNum(o[k]); out[k] = n; if (n !== null) any = true; });
+    return any ? out : null;
+  };
+  const pickStr = (o, keys) => {
+    if (!o || typeof o !== "object") return null;
+    for (const k of keys) if (typeof o[k] === "string" && o[k]) return o[k];
+    return null;
+  };
+  let ebay = null;
+  const ebayRaw = (src.ebay && typeof src.ebay === "object") ? src.ebay : null;
+  if (ebayRaw) {
+    const nums = pickNums(ebayRaw, ["cheapestActive", "medianActive"]);
+    const sample = Array.isArray(ebayRaw.sample) ? ebayRaw.sample.filter((s) => s && typeof s === "object" && marketNum(s.price) !== null && typeof s.url === "string" && s.url.indexOf("http") === 0).slice(0, 5).map((s) => ({ title: String(s.title || "eBay listing").slice(0, 120), price: marketNum(s.price), currency: String(s.currency || ebayRaw.currency || "USD"), url: String(s.url) })) : [];
+    const count = marketNum(ebayRaw.activeCount);
+    if (nums || sample.length || count !== null) ebay = { cheapestActive: nums ? nums.cheapestActive : null, medianActive: nums ? nums.medianActive : null, activeCount: count, currency: String(ebayRaw.currency || "USD"), sample: sample, observedAt: pickStr(ebayRaw, ["observedAt", "asOf"]) };
+  }
+  /* TCGplayer numbers may arrive via TCGdex (per-variant objects) or
+     TCGCSV (flat market/low/mid/high). First flat match wins. */
+  let tcg = null;
+  const tcgCand = [];
+  if (src.tcgplayer && typeof src.tcgplayer === "object") tcgCand.push([src.tcgplayer, "TCGplayer"]);
+  if (src.tcgdex && src.tcgdex.tcgplayer && typeof src.tcgdex.tcgplayer === "object") tcgCand.push([src.tcgdex.tcgplayer, "TCGdex"]);
+  if (src.tcgcsv && typeof src.tcgcsv === "object") tcgCand.push([src.tcgcsv, "TCGCSV"]);
+  for (const pair of tcgCand) {
+    const nums = pickNums(pair[0], ["market", "low", "mid", "high"]);
+    if (nums) { tcg = { market: nums.market, low: nums.low, mid: nums.mid, high: nums.high, currency: String(pair[0].currency || "USD"), via: pair[1], observedAt: pickStr(pair[0], ["observedAt", "asOf", "updated"]) }; break; }
+  }
+  /* Per-variant TCGplayer (TCGdex normal / reverse-holofoil / holofoil …):
+     each variant object carries marketPrice / lowPrice / highPrice. */
+  let tcgVariants = null;
+  const variantSrc = (src.tcgdex && src.tcgdex.tcgplayer && typeof src.tcgdex.tcgplayer === "object") ? src.tcgdex.tcgplayer : ((src.tcgplayer && typeof src.tcgplayer === "object" && src.tcgplayer.variants) ? src.tcgplayer : null);
+  if (variantSrc) {
+    if (Array.isArray(variantSrc.variants)) {
+      const vs = variantSrc.variants.filter((v) => v && typeof v === "object").map((v) => ({ name: String(v.name || v.variant || ""), market: marketNum(v.market), low: marketNum(v.low), high: marketNum(v.high) })).filter((v) => v.name && (v.market !== null || v.low !== null || v.high !== null)).slice(0, 6);
+      if (vs.length) tcgVariants = vs;
+    } else {
+      const vs = [];
+      Object.keys(variantSrc).forEach((k) => {
+        const v = variantSrc[k];
+        if (!v || typeof v !== "object") return;
+        const nums = { market: marketNum(v.marketPrice), low: marketNum(v.lowPrice), high: marketNum(v.highPrice) };
+        if (nums.market !== null || nums.low !== null || nums.high !== null) vs.push({ name: k, market: nums.market, low: nums.low, high: nums.high });
+      });
+      if (vs.length) tcgVariants = vs.slice(0, 6);
+    }
+  }
+  if (tcg && tcgVariants) tcg.variants = tcgVariants;
+  else if (!tcg && tcgVariants) {
+    /* Variants only (TCGdex shape): use the "normal" variant — else the
+       first — for the compact row; all variants stay in Details. */
+    const first = tcgVariants.find((v) => v.name === "normal") || tcgVariants[0];
+    tcg = { market: first.market, low: first.low, mid: null, high: first.high, currency: "USD", via: "TCGdex", observedAt: null, variants: tcgVariants };
+  }
+  let cm = null;
+  const cmCand = [];
+  if (src.cardmarket && typeof src.cardmarket === "object") cmCand.push([src.cardmarket, "Cardmarket"]);
+  if (src.tcgdex && src.tcgdex.cardmarket && typeof src.tcgdex.cardmarket === "object") cmCand.push([src.tcgdex.cardmarket, "TCGdex"]);
+  if (src.cardmarketFile && typeof src.cardmarketFile === "object") cmCand.push([src.cardmarketFile, "Cardmarket price guide"]);
+  for (const pair of cmCand) {
+    const nums = pickNums(pair[0], ["trend", "avg", "low"]);
+    if (nums) { cm = { trend: nums.trend, avg: nums.avg, low: nums.low, currency: String(pair[0].currency || "EUR"), via: pair[1], observedAt: pickStr(pair[0], ["observedAt", "asOf", "updated"]) }; break; }
+  }
+  const fx = (j.fx && typeof j.fx === "object") ? pickNums(j.fx, ["USD_IDR", "EUR_IDR"]) : null;
+  const sales = (j.sales && typeof j.sales === "object") ? { status: String(j.sales.status || "not_available"), note: (typeof j.sales.note === "string" ? j.sales.note : "") } : { status: "not_available", note: "" };
+  return {
+    asOf: (typeof j.asOf === "string" && j.asOf) ? j.asOf : null,
+    sources: { ebay: ebay, tcgplayer: tcg, cardmarket: cm },
+    sales: sales,
+    fx: fx,
+  };
+}
+function marketIsFresh(m) {
+  if (!m || !m.asOf) return false;
+  const t = new Date(m.asOf).getTime();
+  if (Number.isNaN(t)) return false;
+  return (Date.now() - t) < 24 * 3600 * 1000;
+}
+function marketSourceChips(m) {
+  if (!m || !m.sources) return [];
+  const chips = [];
+  const eb = m.sources.ebay;
+  if (eb && (eb.cheapestActive !== null || eb.medianActive !== null || (eb.sample && eb.sample.length))) chips.push("eBay");
+  const tc = m.sources.tcgplayer;
+  if (tc && (tc.market !== null || tc.low !== null || tc.high !== null || (tc.variants && tc.variants.length))) chips.push("TCGplayer");
+  const cm = m.sources.cardmarket;
+  if (cm && (cm.trend !== null || cm.avg !== null || cm.low !== null)) chips.push("Cardmarket");
+  return chips;
+}
+function marketRowHtml(label, body) {
+  return '<div style="padding:0.5rem 0;border-top:1px solid var(--border)"><p style="margin:0;font-size:13.5px;line-height:1.6"><strong>' + esc(label) + ':</strong> ' + body + "</p></div>";
+}
+function marketDetailsHtml(m) {
+  const eb = m.sources ? m.sources.ebay : null;
+  const tc = m.sources ? m.sources.tcgplayer : null;
+  const cm = m.sources ? m.sources.cardmarket : null;
+  let inner = "";
+  if (eb && eb.sample && eb.sample.length) {
+    inner += '<p style="margin:0.5rem 0 0.25rem;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">eBay listings</p><ul style="list-style:none;margin:0;padding:0" class="stack">' + eb.sample.map((s) => '<li style="font-size:13px;line-height:1.55"><a href="' + esc(s.url) + '" target="_blank" rel="noopener" style="color:var(--text)">' + esc(s.title) + "</a> — " + marketMoneyHtml(s.price, s.currency, m) + "</li>").join("") + "</ul>";
+  }
+  if (tc && tc.variants && tc.variants.length) {
+    inner += '<p style="margin:0.75rem 0 0.25rem;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">TCGplayer variants</p><ul style="list-style:none;margin:0;padding:0" class="stack">' + tc.variants.map((v) => '<li style="font-size:13px;line-height:1.55">' + esc(v.name) + " — Market " + marketMoneyHtml(v.market, tc.currency, m) + " · Low " + marketMoneyHtml(v.low, tc.currency, m) + " · High " + marketMoneyHtml(v.high, tc.currency, m) + "</li>").join("") + "</ul>";
+  }
+  const obs = [];
+  if (eb && eb.observedAt) obs.push("eBay: " + fmtDate(eb.observedAt));
+  if (tc && tc.observedAt) obs.push("TCGplayer: " + fmtDate(tc.observedAt));
+  if (cm && cm.observedAt) obs.push("Cardmarket: " + fmtDate(cm.observedAt));
+  if (obs.length) inner += '<p class="dim" style="margin:0.75rem 0 0;font-size:12px;line-height:1.6">Observed per source — ' + esc(obs.join(" · ")) + ".</p>";
+  if (!inner) return "";
+  return '<details style="margin-top:0.625rem"><summary class="fc" style="cursor:pointer;font-size:12px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.25rem;display:inline-flex;align-items:center">Details</summary><div style="margin-top:0.25rem">' + inner + "</div></details>";
+}
+/* The ONE compact market card (§7). t = { market, overall, valueRaw,
+   valueGrade9, valueGrade10, valueAtGrade, pop, det, refreshable,
+   loading }. Replaces the old honest-line + hint block in both the
+   grading-result view and the report view. */
+function marketCardHtml(t) {
+  const m = (t.market && typeof t.market === "object") ? t.market : null;
+  const urls = marketOutboundUrls(t.det || {});
+  const hint = marketHintText(t.overall, t.valueRaw, t.valueAtGrade, t.pop);
+  const fresh = marketIsFresh(m);
+  const overallTxt = (typeof t.overall === "number" && Number.isFinite(t.overall)) ? t.overall.toFixed(1) : "—";
+  let html = '<article class="slab-frame card" style="border-radius:1.25rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Market data</h3>';
+  if (m) {
+    const chips = marketSourceChips(m);
+    html += '<p class="dim" style="margin-top:0.375rem;font-size:12px;line-height:1.6">' + (m.asOf ? "as of " + esc(fmtDate(m.asOf)) : "observation date unknown") + (chips.length ? ' · <span style="color:var(--text)">' + chips.map(esc).join(" · ") + "</span>" : "") + "</p>";
+    if (!fresh && m.asOf) html += '<p style="margin-top:0.375rem;font-size:13px;line-height:1.6">Snapshot from ' + esc(fmtDate(m.asOf)) + " — prices may be outdated.</p>";
+    html += '<div style="margin-top:0.5rem" class="stack">';
+    const eb = m.sources ? m.sources.ebay : null;
+    html += marketRowHtml("eBay", eb ? ("Cheapest active " + marketMoneyHtml(eb.cheapestActive, eb.currency, m) + " · Median active " + marketMoneyHtml(eb.medianActive, eb.currency, m) + ' <span class="dim">(asking prices, not sales' + (eb.activeCount ? "; " + eb.activeCount + " active listings" : "") + ")</span>") : "not available");
+    const tc = m.sources ? m.sources.tcgplayer : null;
+    html += marketRowHtml("TCGplayer", tc ? ("Market " + marketMoneyHtml(tc.market, tc.currency, m) + " · Low " + marketMoneyHtml(tc.low, tc.currency, m) + " · High " + marketMoneyHtml(tc.high, tc.currency, m) + (tc.via ? ' <span class="dim">(via ' + esc(tc.via) + ")</span>" : "")) : "not available");
+    const cm = m.sources ? m.sources.cardmarket : null;
+    html += marketRowHtml("Cardmarket", cm ? ("Trend " + marketMoneyHtml(cm.trend, cm.currency, m) + " · Avg " + marketMoneyHtml(cm.avg, cm.currency, m) + " · Low " + marketMoneyHtml(cm.low, cm.currency, m) + (cm.via ? ' <span class="dim">(via ' + esc(cm.via) + ")</span>" : "")) : "not available");
+    html += marketRowHtml("TEG estimate", (t.valueAtGrade > 0 ? fmtIDR(t.valueAtGrade) + ' <span class="dim">at grade ' + overallTxt + " — TEG estimate</span>" : "not available"));
+    html += "</div>";
+  } else {
+    html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">Market data not collected for this entry — refresh to fetch current prices.</p>';
+    if (t.valueAtGrade > 0) html += '<div style="margin-top:0.5rem" class="stack">' + marketRowHtml("TEG estimate", fmtIDR(t.valueAtGrade) + ' <span class="dim">at grade ' + overallTxt + " — TEG estimate</span>") + "</div>";
+  }
+  if (hint) html += '<p style="margin-top:0.625rem;font-size:13.5px;line-height:1.6"><strong>Hint:</strong> ' + esc(hint) + ' This is a hint, not financial advice.</p>';
+  html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">No recent completed sales from current sources.</p>';
+  html += '<div style="margin-top:0.625rem;display:flex;gap:0.5rem;flex-wrap:wrap">' +
+    '<a href="' + esc(urls.ebay) + '" target="_blank" rel="noopener" class="fc" style="border:1px solid var(--border);border-radius:999px;padding:0.5rem 0.875rem;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text);text-decoration:none;min-height:2.5rem;display:inline-flex;align-items:center">Search on eBay</a>' +
+    '<a href="' + esc(urls.facebook) + '" target="_blank" rel="noopener" class="fc" style="border:1px solid var(--border);border-radius:999px;padding:0.5rem 0.875rem;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text);text-decoration:none;min-height:2.5rem;display:inline-flex;align-items:center">Search on Facebook Marketplace</a></div>';
+  html += '<p class="dim" style="margin-top:0.375rem;font-size:12px;line-height:1.6">Facebook does not offer a public API — prices cannot be fetched automatically.</p>';
+  if (m) html += '<p class="dim" style="margin-top:0.5rem;font-size:12px;line-height:1.6">Prices are listing and guide prices from the sources shown, converted to IDR on ' + esc(m.asOf ? fmtDate(m.asOf) : "unknown date") + '. They are not recorded sales.</p>' + marketDetailsHtml(m);
+  if (t.refreshable) {
+    html += '<div style="margin-top:0.75rem">' + (t.loading
+      ? '<button type="button" disabled class="btn-ghost fc" style="padding:0.65rem 1.2rem;min-height:44px;font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;opacity:0.6">Fetching market data…</button>'
+      : '<button type="button" data-action="refresh-market" class="btn-ghost fc" style="padding:0.65rem 1.2rem;min-height:44px;font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase">Refresh market data</button>') + "</div>";
+  }
+  html += "</article>";
+  return html;
+}
+/* Call market-prices the way detect-card is called (SB_KEYS fallback on
+   401/403, one total deadline, no key ever stored). Throws on any failure
+   — callers fall back to the stored snapshot, never to invented numbers. */
+async function fetchMarketPrices(det, forceRefresh) {
+  const url = SB.base + "/functions/v1/market-prices";
+  const payload = { name: String(det.cardName || ""), set: String(det.setName || ""), number: String(det.cardNumber || ""), category: marketCategoryFor(det), rarity: String(det.rarity || ""), language: String(det.language || ""), forceRefresh: Boolean(forceRefresh) };
+  const TOTAL_MS = 30000;
+  const startedAt = Date.now();
+  let lastErr = null;
+  for (let attempt = 0; attempt < SB_KEYS.length; attempt++) {
+    if (Date.now() - startedAt >= TOTAL_MS) break;
+    const key = SB_KEYS[(sbKeyIndex + attempt) % SB_KEYS.length];
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), Math.max(0, TOTAL_MS - (Date.now() - startedAt))) : null;
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", apikey: key, Authorization: "Bearer " + key }, body: JSON.stringify(payload), signal: controller ? controller.signal : undefined });
+    } catch (netErr) {
+      if (timer) clearTimeout(timer);
+      const err = new Error(netErr && netErr.name === "AbortError" ? "timeout" : "network");
+      err.code = "NETWORK"; lastErr = err;
+      break;
+    }
+    if (timer) clearTimeout(timer);
+    if (res.status === 401 || res.status === 403) {
+      if (attempt < SB_KEYS.length - 1) continue;
+      const err = new Error("HTTP " + res.status); err.status = res.status; throw err;
+    }
+    if (!res.ok) { const err = new Error("HTTP " + res.status); err.status = res.status; throw err; }
+    sbKeyIndex = (sbKeyIndex + attempt) % SB_KEYS.length;
+    let json;
+    try { json = await res.json(); } catch (e) { const err = new Error("invalid json"); err.code = "INVALID_JSON"; throw err; }
+    const snap = sanitizeMarketSnapshot(json);
+    if (!snap) { const err = new Error("empty market response"); err.code = "EMPTY"; throw err; }
+    return snap;
+  }
+  throw lastErr || new Error("market-prices unavailable");
+}
+/* Once after Reveal, before save: fetch the snapshot for the draft.
+   Never called during Analyse. A failure leaves the snapshot null —
+   the card shows the stored estimate instead. */
+async function fetchMarketAfterReveal() {
+  if (!state.det || !state.revealed || state.marketFetched || state.marketLoading) return;
+  state.marketLoading = true;
+  try { state.marketSnapshot = await fetchMarketPrices(state.det, false); state.marketSnapshotKey = marketSnapshotKeyFor(state.det); }
+  catch (e) { state.marketSnapshot = null; state.marketSnapshotKey = null; }
+  state.marketFetched = true;
+  state.marketLoading = false;
+  const rr = $("#reportRoot");
+  if (state.revealed && rr && rr.classList.contains("hidden")) renderTab();
+}
+/* "Refresh market data" — display only, never rewrites the saved entry.
+   In a report it stores the fresh snapshot in state.reportMarket for
+   this view only; in the result view it updates state.marketSnapshot,
+   which the next save then stores via buildSavePayload. */
+async function refreshMarketData() {
+  const btn = document.querySelector('[data-action="refresh-market"]');
+  if (btn) { btn.disabled = true; btn.textContent = "Fetching market data…"; }
+  const rr = $("#reportRoot");
+  const inReport = rr && !rr.classList.contains("hidden") && state.reportId != null;
+  if (inReport) {
+    if (state.reportMarketLoading) return;
+    state.reportMarketLoading = true;
+    try {
+      const pg = await DB.getGrading(state.reportId);
+      if (!pg) throw new Error("Report not found");
+      const m = await fetchMarketPrices({ category: pg.category, cardName: pg.cardName, setName: pg.setName, cardNumber: pg.cardNumber, rarity: pg.rarity, language: pg.language }, true);
+      state.reportMarket = { id: String(pg.id), market: m };
+      state.reportMarketLoading = false;
+      void renderReport(state.reportId);
+    } catch (e) {
+      state.reportMarketLoading = false;
+      toast("Market data unavailable — showing the stored snapshot.");
+      void renderReport(state.reportId);
+    }
+    return;
+  }
+  if (!state.det || state.marketLoading) return;
+  state.marketLoading = true;
+  try {
+    state.marketSnapshot = await fetchMarketPrices(state.det, true);
+    state.marketSnapshotKey = marketSnapshotKeyFor(state.det);
+    state.marketFetched = true;
+  } catch (e) {
+    toast("Market data unavailable — showing the stored estimate.");
+  }
+  state.marketLoading = false;
+  renderTab();
+}
 /* v27.5 · Financial card helpers (report view). Every number below is
    arithmetic on the four stored snapshot numbers only (valueRaw /
    valueGrade9 / valueGrade10 / valueAtGrade) — there is no sales history,
@@ -4503,18 +4822,18 @@ function ladderHtml(t) {
    Financial card per screen, never two. */
 function financialCardHtml(t) {
   const hasPrice = (t.valueRaw > 0) || (t.valueGrade9 > 0) || (t.valueGrade10 > 0) || (t.valueAtGrade > 0);
-  const hint = marketHintText(t.overall, t.valueRaw, t.valueAtGrade, t.pop);
   if (!t.showSnapshot) {
-    let html = '<article class="slab-frame card" style="border-radius:1.25rem"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Market insights</h3>';
-    html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">No recent sales data available from current sources — the figures above are price estimates, not recorded sales.</p>';
-    if (hint) html += '<p style="margin-top:0.375rem;font-size:13.5px;line-height:1.6"><strong>Hint:</strong> ' + esc(hint) + ' This is a hint, not financial advice.</p>';
-    html += "</article>";
-    return html;
+    /* v27.7: the minimal market block is now the compact Market data card
+       (snapshot when one was fetched after Reveal, else the stored
+       estimate + "not collected" line + Refresh). */
+    return marketCardHtml({ market: t.market || null, overall: t.overall, valueRaw: t.valueRaw, valueGrade9: t.valueGrade9, valueGrade10: t.valueGrade10, valueAtGrade: t.valueAtGrade, pop: t.pop, det: t.det || null, refreshable: t.refreshable !== false, loading: Boolean(t.marketLoading) });
   }
   let html = '<article class="slab-frame card fin-card"><h3 class="fc" style="font-size:13px;font-weight:600;letter-spacing:0.18em;text-transform:uppercase">Financial</h3>';
   if (!hasPrice) {
     html += '<p class="dim" style="margin-top:0.5rem;font-size:14px;line-height:1.6">No price estimate stored for this card yet.</p>';
-    html += '<p class="dim" style="margin-top:0.375rem;font-size:13.5px;line-height:1.6">No recent sales data available from current sources.</p>';
+    /* v27.7: still show the compact Market data card — it can fetch live
+       prices even when no TEG estimate was stored. */
+    html += marketCardHtml({ market: t.market || null, overall: t.overall, valueRaw: t.valueRaw, valueGrade9: t.valueGrade9, valueGrade10: t.valueGrade10, valueAtGrade: t.valueAtGrade, pop: t.pop, det: t.det || null, refreshable: t.refreshable !== false, loading: Boolean(t.marketLoading) });
     html += "</article>";
     return html;
   }
@@ -4532,8 +4851,10 @@ function financialCardHtml(t) {
     "</div></div>";
   html += donutHtml(t);
   html += ladderHtml(t);
-  html += '<p class="dim" style="margin-top:0.75rem;font-size:13.5px;line-height:1.6">No recent sales data available from current sources — the figures above are price estimates, not recorded sales.</p>';
-  if (hint) html += '<p style="margin-top:0.375rem;font-size:13.5px;line-height:1.6"><strong>Hint:</strong> ' + esc(hint) + ' This is a hint, not financial advice.</p>';
+  /* v27.7: the market block is now the compact Market data card (same
+     card as the result view, fed by the stored snapshot when present).
+     The ladder above stays TEG estimates — "Based on TEG estimates". */
+  html += marketCardHtml({ market: t.market || null, overall: t.overall, valueRaw: t.valueRaw, valueGrade9: t.valueGrade9, valueGrade10: t.valueGrade10, valueAtGrade: t.valueAtGrade, pop: t.pop, det: t.det || null, refreshable: t.refreshable !== false, loading: Boolean(t.marketLoading) });
   html += "</article>";
   return html;
 }
@@ -5083,6 +5404,15 @@ const state = {
   popInput: "", popQuery: "",
   /* report */
   reportSide: "front",
+  reportId: null,
+  /* market data v27.7 — session only; the only persisted copy is the
+     detail.market snapshot written by buildSavePayload at save time */
+  marketSnapshot: null,
+  marketSnapshotKey: null,
+  marketFetched: false,
+  marketLoading: false,
+  reportMarket: null,
+  reportMarketLoading: false,
   /* defect map v27 — selected clickable marker (null = panel closed) */
   selectedDefectId: null,
   defectGray: false,
@@ -7257,6 +7587,12 @@ function buildSavePayload(d, a, v, f, b, opts) {
       fingerprint: (a && a.trust && a.trust.fingerprint) || null,
       anomaly: (a && a.trust && a.trust.anomaly) || null,
       fingerprintMatch: state.fingerprintMatch || null,
+      /* v27.7: market snapshot fetched once after Reveal (market-prices).
+         Stored in detail JSONB — no schema change. Old entries have none
+         (never backfilled); null means "not collected". Guarded by the
+         snapshot key so an identity correction never stores another
+         card's snapshot. */
+      market: (state.marketSnapshot && state.marketSnapshotKey === marketSnapshotKeyFor(d)) ? state.marketSnapshot : null,
       /* K2/E12: label koreksi — baris ini menggantikan (supersedes) baris
          lama; baris lama tetap ada (RLS) dan tetap dihitung Pop. */
       correction: (opts && opts.isCorrection) ? { isCorrection: true, supersedesId: opts.supersedesId != null ? String(opts.supersedesId) : null, correctedAt: new Date().toISOString() } : null,
@@ -7609,6 +7945,9 @@ async function runAnalysis(isSample) {
      sengaja TIDAK dihapus di sini) dan analisis diulang (analisis piksel
      lokal, tanpa biaya server). */
   state.draftPayload = buildSavePayload(detection, combined, vals, state.front, state.back);
+  /* v27.7: fresh grading, fresh market snapshot — fetched once after
+     Reveal (fetchMarketAfterReveal), never during Analyse. */
+  state.marketSnapshot = null; state.marketSnapshotKey = null; state.marketFetched = false; state.marketLoading = false; state.reportMarket = null;
   /* Langkah terakhir selesai hanya setelah gabungan + draf benar-benar
      jadi. Catatannya TIDAK memuat grade keseluruhan — itu urusan Reveal. */
   setScanPhase("combine", { status: "done", note: (state.back ? "Both sides combined" : "Single side combined") + " · findings compiled (" + (combined && combined.findings ? combined.findings.length : 0) + " findings) · Price estimated from the stored snapshot", sub: combined && combined.trust && combined.trust.fingerprint ? "Checked against your history — " + (state.fingerprintMatch ? "possible match" : "no match") : "" });
@@ -8078,7 +8417,7 @@ function renderResultHtml() {
   if (det.basis) html += '<p class="dim" style="margin-top:0.25rem;text-align:center;font-size:12px">' + esc(det.basis) + "</p>";
   html += '<p class="dim" style="margin-top:0.5rem;text-align:center;font-size:12px">Rough estimate from market &amp; photos — not an official appraisal.</p></div>';
   /* v27.4 · Trust & Authenticity (first-pass checks — never change the grade). */
-  html += trustSectionHtml({ trim: (a.trust && a.trust.trim) || null, fingerprint: (a.trust && a.trust.fingerprint) || null, anomaly: (a.trust && a.trust.anomaly) || null, fingerprintMatch: state.fingerprintMatch || null, overall: a.overall, valueRaw: values.raw, valueGrade9: values.g9, valueGrade10: values.g10, valueAtGrade: displayValueAtGrade(a.overall, values), pop: popForCard(state.allRows || [], det, a.overall), showSnapshot: false });
+  html += trustSectionHtml({ trim: (a.trust && a.trust.trim) || null, fingerprint: (a.trust && a.trust.fingerprint) || null, anomaly: (a.trust && a.trust.anomaly) || null, fingerprintMatch: state.fingerprintMatch || null, overall: a.overall, valueRaw: values.raw, valueGrade9: values.g9, valueGrade10: values.g10, valueAtGrade: displayValueAtGrade(a.overall, values), pop: popForCard(state.allRows || [], det, a.overall), showSnapshot: false, market: state.marketSnapshot || null, det: det, marketLoading: state.marketLoading });
   html += '<button type="button" data-action="reset-grading" class="btn-gold fd" style="width:100%;border-radius:999px;padding:0.875rem 1rem;font-size:18px;font-weight:700;min-height:56px">Grade another card</button>';
   html += "</div>";
   return html;
@@ -8291,10 +8630,20 @@ function renderStandards() {
   html += '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="margin-top:1rem;border-radius:1.25rem"><h3 class="fc" style="font-size:15px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase">Trust &amp; Authenticity</h3>' +
     '<p class="dim" style="margin-top:0.25rem;font-size:14px;line-height:1.65">Four first-pass photo checks, shown in every report. None of them changes the grade.</p>' +
     '<ul style="list-style:none;margin:0.625rem 0 0;padding:0" class="stack">' +
-    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Market insights</strong> — the price snapshot already stored for the card (raw / grade 9 / grade 10 / at grade) plus a hold/trade/sell hint from the grade premium over raw and, where available, the Pop Report population. No recent sales data is shown, because the current sources do not provide any — the report says so plainly instead of inventing a sales list.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Market insights</strong> — one compact Market data card per report: live listing and guide prices from eBay, TCGplayer and Cardmarket (see "Market data" below), plus the TEG estimate at grade and a hold/trade/sell hint. No recent sales data is shown, because no free source provides any — the report says so plainly instead of inventing a sales list.</span></li>' +
     '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Trim detection</strong> — the detected card outline is measured against the 63 × 88 mm standard (width/height ratio 0.7159). A large deviation (over 12%) on a near-frontal photo (opposite edges within 6%) flags the card for a manual edge inspection, and the measured size is shown when flagged. Honest limit: a small trim (a few millimetres) is below the measurement noise of a handheld phone photo — clean corpus photos deviate up to ~9% from perspective alone — so a clean result does not prove the card is untrimmed. When the card fills the frame, its full outline is not visible and the check is not measurable.</span></li>' +
     '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Digital fingerprint</strong> — a 64-character average hash of the straightened front photo, recorded at grading. A new grading whose hash is within 5 of 256 bits of an earlier entry is flagged as "appears to have been graded before", with a link to that entry. Matching only covers cards graded here — it cannot detect resubmissions to other services. Entries graded before this check have no fingerprint.</span></li>' +
     '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Print, ink &amp; holo check</strong> — first-pass texture checks on the straightened photo (print-texture uniformity, ink-density consistency, holo reflectivity variance). A flag is a warning to inspect manually, never a "fake" verdict; a clean result says "no anomalies detected", never "authentic".</span></li>' +
+    "</ul></article>";
+  /* v27.7 · Market data — how the compact Market data card is built. */
+  html += '<article data-aos="fade-up" data-aos-duration="1000" class="slab-frame card" style="margin-top:1rem;border-radius:1.25rem"><h3 class="fc" style="font-size:15px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase">Market data</h3>' +
+    '<p class="dim" style="margin-top:0.25rem;font-size:14px;line-height:1.65">Every report carries one compact Market data card, fetched once after Reveal and stored with the entry (entries graded before this have none, and are never backfilled). Prices are listing and guide prices from the sources shown, converted to IDR on the observation date. They are not recorded sales.</p>' +
+    '<ul style="list-style:none;margin:0.625rem 0 0;padding:0" class="stack">' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Sources</strong> — eBay (cheapest + median of the active listings), TCGplayer (market / low / high), Cardmarket (trend / avg / low), plus the TEG estimate at grade. Each row names its source; example eBay listings and per-variant TCGplayer prices sit behind "Details".</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Median active</strong> — the median of the 10 cheapest active eBay listings, so one extreme listing cannot move the number. eBay listings are asking prices, not completed sales.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Labels</strong> — "asking prices" means a listing still for sale; "TEG estimate" means TEG\'s own estimate at grade, never an upstream price; "not available" means that source had no price for this card, never zero.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Limits</strong> — no source returns a price for a TEG grade, so the Financial ladder stays a TEG estimate ("Based on TEG estimates"). Graded prices from other companies are never shown as TEG grades. There is no recent-sales data in the free tier: eBay sold history, TCGplayer and Cardmarket sales are all closed to new developers. Facebook does not offer a public API — prices cannot be fetched automatically, so Facebook is a search link only.</span></li>' +
+    '<li style="display:flex;align-items:flex-start;gap:0.5rem;font-size:14px;line-height:1.6" class="dim"><span aria-hidden="true" style="margin-top:7px;height:6px;width:6px;flex-shrink:0;border-radius:999px;background:var(--gold)"></span><span><strong style="color:var(--text)">Freshness</strong> — a snapshot older than 24 hours is shown with its date plus a "Refresh market data" button. Refresh updates the display only; it never rewrites the saved entry.</span></li>' +
     "</ul></article>";
   html += "</section>";
   return html;
@@ -8781,6 +9130,7 @@ function understandReportHtml() {
     "</ol></section>";
 }
 async function renderReport(id) {
+  state.reportId = id; /* v27.7: Refresh market data needs the open entry */
   const appRoot = $("#appRoot");
   const root = $("#reportRoot");
   appRoot.classList.add("hidden");
@@ -8867,7 +9217,7 @@ async function renderReport(id) {
     html += radarSectionHtml({ centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface, structure: pg.structure });
     html += gradeBreakdownHtml(pg, detail, findings, allMarkers);
     /* v27.4 · Trust & Authenticity (first-pass checks — never change the grade). */
-    html += trustSectionHtml({ trim: detail.trim || null, fingerprint: detail.fingerprint || null, anomaly: detail.anomaly || null, fingerprintMatch: detail.fingerprintMatch || null, overall: pg.overall, valueRaw: pg.valueRaw, valueGrade9: pg.valueGrade9, valueGrade10: pg.valueGrade10, valueAtGrade: pg.valueAtGrade, pop: null, showSnapshot: true });
+    html += trustSectionHtml({ trim: detail.trim || null, fingerprint: detail.fingerprint || null, anomaly: detail.anomaly || null, fingerprintMatch: detail.fingerprintMatch || null, overall: pg.overall, valueRaw: pg.valueRaw, valueGrade9: pg.valueGrade9, valueGrade10: pg.valueGrade10, valueAtGrade: pg.valueAtGrade, pop: null, showSnapshot: true, market: (state.reportMarket && String(state.reportMarket.id) === String(pg.id) ? state.reportMarket.market : (detail.market || null)), det: pg, marketLoading: state.reportMarketLoading });
     /* Bukti foto */
     const side = state.reportSide === "back" && pg.backUrl ? "back" : "front";
     const sideUrl = side === "front" ? pg.frontUrl : pg.backUrl;
@@ -8967,6 +9317,7 @@ function openReport(id) {
   void renderReport(id);
 }
 function closeReport() {
+  state.reportId = null; state.reportMarket = null; /* v27.7 */
   try { history.pushState(null, "", "#grading"); } catch (e) {}
   const rr = $("#reportRoot");
   if (rr) { rr.classList.add("hidden"); rr.innerHTML = ""; }
@@ -9280,6 +9631,9 @@ document.addEventListener("click", (e) => {
   } else if (action === "reveal-grade") {
     state.revealed = true;
     renderTab();
+    /* v27.7: fetch the market snapshot once now (before save), so the
+       draft saved afterwards carries detail.market. */
+    void fetchMarketAfterReveal();
     const slab = document.getElementById("resultSlab");
     if (slab && slab.scrollIntoView) slab.scrollIntoView({ behavior: "smooth", block: "start" });
   } else if (action === "analyze") {
@@ -9369,6 +9723,8 @@ document.addEventListener("click", (e) => {
     openReport(target.getAttribute("data-id"));
   } else if (action === "close-report") {
     closeReport();
+  } else if (action === "refresh-market") {
+    void refreshMarketData();
   } else if (action === "report-side") {
     handleReportSideClick(target);
   } else if (action === "defect-marker") {
