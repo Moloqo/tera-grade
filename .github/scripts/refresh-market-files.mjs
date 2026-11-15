@@ -611,16 +611,18 @@ async function refreshTcgcsv(setMap) {
     // stripped (tcgcsvCardName, verified on group 23286); number is the
     // extendedData "Number" (e.g. "001/182"); set/category come from
     // tcg_set_map via the group id. If any part is missing the row is
-    // STILL upserted — but WITHOUT card_key (the property is omitted
-    // from the payload, so PostgREST merge-duplicates leaves any
-    // existing key untouched on conflict and new rows get NULL). A
-    // NULL-card_key row is stored but invisible to the Edge Function's
-    // .eq("card_key", ...) lookup. Never invent one.
+    // STILL upserted — with card_key: null. The key must ALWAYS be
+    // present in the payload: PostgREST rejects a bulk upsert whose
+    // objects have different key sets (PGRST102 "All object keys must
+    // match") — omitting the property on some rows fails the whole
+    // batch (verified live 2026-11-16, workflow run #2). NULL card_key
+    // is fine for the UNIQUE constraint (Postgres treats NULLs as
+    // distinct). A NULL-card_key row is stored but invisible to the
+    // Edge Function's .eq("card_key", ...) lookup. Never invent one.
     const setEntry = setMap.tcgcsvGroupMap.get(groupId);
     const cardKey = buildCardKey(setEntry?.category, tcgcsvCardName(info.name), setEntry?.tegSet, info.number);
-    const row = { product_id: productId, market: market ?? null, low: low ?? null, mid: mid ?? null, high: high ?? null, updated: todayISO() };
+    const row = { product_id: productId, card_key: cardKey, market: market ?? null, low: low ?? null, mid: mid ?? null, high: high ?? null, updated: todayISO() };
     if (cardKey === null) { skippedNoCardKey++; }
-    else row.card_key = cardKey;
     rows.push(row);
   }
   log(`TCGCSV: ${priceEntries.length} prices entries scanned, ${prodEntries.length} products in join map, ${rows.length} mapped, ${skippedUnmapped} unmapped skipped, ${skippedNoGroup} without group id skipped, ${skippedNoProduct} prices rows with no products entry skipped, ${skippedNoCardKey} without card-key data (stored without card_key), ${skippedNoPrice} unreadable skipped`);
