@@ -5938,8 +5938,19 @@ function defectVisibleCounts(markers) {
    here). Findings without a dot (minor, suppressed, estimated) are
    counted in one line below — never given a guessed position. Tapping a
    dot reuses the existing report-show-marker action, which opens the
-   defect detail sheet in the Photo Evidence section. */
-function surfaceMapHtml(allMarkers) {
+   defect detail sheet in the Photo Evidence section.
+   v27.9.3 · VISIBILITY FIX — the 63:88 schematic used to be an empty
+   #1b1b1e box on a #04030E page (1px #2b2b30 border): near-black on
+   black, invisible on a phone. Now each side renders the saved card
+   photo (grayscale, same filter as the defect map's .defect-gray:
+   grayscale(1) contrast(1.06)) as the schematic background, at the
+   photo's own aspect ratio — NO fixed 63:88 box and NO cover/contain
+   crop, so the % dot positions stay in the same photo space as the
+   defect map and land on the right spot. When a side has no saved
+   photo URL (old entries), the 63:88 box stays but with a clearly
+   lighter fill (#43434e), a 2px near-white border (#f5f5f2) and a
+   faint inner edge, so the card shape still reads at a glance. */
+function surfaceMapHtml(allMarkers, frontUrl, backUrl) {
   const list = Array.isArray(allMarkers) ? allMarkers : [];
   const sevColor = { berat: "#cf5138", sedang: "#c96a27" };
   const sideHtml = function (side) {
@@ -5951,8 +5962,18 @@ function surfaceMapHtml(allMarkers) {
       const sev = SEVERITY_STYLE[m.severity] || SEVERITY_STYLE.sedang;
       return '<button type="button" class="annot-dot" data-action="report-show-marker" data-marker-id="' + esc(m.id) + '" data-side="' + esc(side) + '" aria-label="' + esc(capFirst(translateLegacyText(m.label + ", " + sev.label.toLowerCase() + " defect, marker " + n))) + '" style="left:' + (m.x * 100) + '%;top:' + (m.y * 100) + '%;background:' + (sevColor[m.severity] || "#c96a27") + '">' + n + '</button>';
     }).join("");
+    const url = side === "front" ? frontUrl : backUrl;
+    /* Photo present: the grayscale photo IS the schematic. The box sizes
+       to the photo's own aspect ratio (no aspect-ratio, no cover crop),
+       so dot % positions stay in photo space, exactly like the defect
+       map. No photo: the 63:88 fallback box with a light fill, a 2px
+       near-white border and a faint inner edge — readable on #04030E
+       even with zero markers. */
+    const schematic = url
+      ? '<div style="position:relative;width:100%;max-width:20rem;margin:0 auto;border:2px solid #f5f5f2;border-radius:0.5rem;overflow:hidden;background:#43434e"><img src="' + esc(url) + '" alt="' + (side === "front" ? "Front" : "Back") + ' photo of the card, grayscale" style="display:block;width:100%;filter:grayscale(1) contrast(1.06)" />' + dotsHtml + '</div>'
+      : '<div style="position:relative;width:100%;max-width:20rem;margin:0 auto;aspect-ratio:63/88;border:2px solid #f5f5f2;border-radius:0.5rem;background:#43434e;box-shadow:inset 0 0 0 1px rgba(245,245,242,0.30)">' + dotsHtml + '</div>';
     return '<div><p class="fc" style="font-size:11px;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;color:var(--dim);margin:0 0 0.5rem">' + (side === "front" ? "Front" : "Back") + '</p>' +
-      '<div style="position:relative;width:100%;max-width:20rem;margin:0 auto;aspect-ratio:63/88;border:1px solid var(--border);border-radius:0.5rem;background:var(--surface2)">' + dotsHtml + '</div>' +
+      schematic +
       (noDot > 0 ? '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;line-height:1.6">' + noDot + ' finding' + (noDot === 1 ? "" : "s") + ' listed without a marker (minor, suppressed, or estimated position).</p>' : "") + '</div>';
   };
   return '<section aria-label="Surface map"><p class="kicker">[ Surface Map ]</p>' +
@@ -9187,7 +9208,7 @@ async function renderReport(id) {
       (sideUrl ? defectMapHtml(sideUrl, allMarkers.filter((m) => m.side === side), side, state.selectedDefectId, "" + (side === "front" ? "front" : "back") + " photo of the card with defect markers")
         : '<p class="dim" style="border:1px dashed var(--border);border-radius:0.75rem;padding:1rem;text-align:center;font-size:14px">' + (pg.photoUploadFailed ? "Photo failed to save." : "Photo not saved.") + "</p>") +
       "</div></section>";
-    html += surfaceMapHtml(allMarkers);
+    html += surfaceMapHtml(allMarkers, pg.frontUrl, pg.backUrl);
   }
   /* Bukti ukur */
   const ev = detail.evidence;
