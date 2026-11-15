@@ -6701,6 +6701,37 @@ function renderGrading() {
   html += "</section>";
   return html;
 }
+/* v27.1g - Quad-check diagnostic lines (F6 T-A4): session-only rendering
+   of state.quadChallenge, set once per run in runAnalysis (staged line
+   6455). Reads NOTHING persisted: history (historyCardHtml) and the QR
+   report (renderReport) build from the saved pg.detail row, which never
+   contains quadChallenge because buildSavePayload never copies it. A side
+   with no diagnostics renders no line at all - never "not available". */
+function quadCheckLine(side, qc) {
+  if (!qc || typeof qc !== "object") return "";
+  const sideWord = side === "back" ? "back" : "front";
+  const label = "Quad check (" + sideWord + "): ";
+  if (typeof qc.medianBefore !== "number") return label + "skipped — manual correction active.";
+  const med = Math.round(qc.medianBefore);
+  if (!qc.triggerFired) return label + "not triggered — median brightness " + med + ".";
+  const shift = (typeof qc.shiftPx === "number" && isFinite(qc.shiftPx))
+    ? (Number.isInteger(qc.shiftPx) ? String(qc.shiftPx) : qc.shiftPx.toFixed(1))
+    : null;
+  if (qc.quadAccepted === "challenger") return label + "triggered (median " + med + ") — challenger accepted, shift " + shift + " px.";
+  if (qc.quadChallenged && shift !== null && qc.shiftPx > 25) return label + "triggered (median " + med + ") — challenger rejected, shift " + shift + " px exceeds 25 px cap.";
+  if (qc.quadChallenged && shift !== null) return label + "triggered (median " + med + ") — challenger rejected, shift " + shift + " px (warp failed), incumbent kept.";
+  return label + "triggered (median " + med + ") — challenger not found, incumbent kept.";
+}
+function quadCheckHtml() {
+  const qc = (typeof state !== "undefined" && state) ? state.quadChallenge : null;
+  if (!qc || typeof qc !== "object") return "";
+  const lines = [quadCheckLine("front", qc.front), quadCheckLine("back", qc.back)].filter(Boolean);
+  if (!lines.length) return "";
+  return '<div class="slab-frame" style="border-radius:1rem;background:var(--surface);padding:0.75rem 0.875rem">' +
+    '<p class="fd" style="font-size:15px;font-weight:700">Quad check</p>' +
+    lines.map((l) => '<p class="dim" style="margin:0.375rem 0 0;font-size:13px;line-height:1.6">' + esc(l) + "</p>").join("") +
+    "</div>";
+}
 function renderResultHtml() {
   const det = state.det, a = state.analysis, values = state.values;
   const ev = a.evidence;
@@ -6840,6 +6871,7 @@ function renderResultHtml() {
       '<div style="margin:0.5rem auto 0;max-width:24rem"><img src="' + esc(url) + '" alt="' + esc(capFirst(translateLegacyText(altText))) + '" style="width:100%;border-radius:0.5rem;display:block" /></div>' +
       '<p class="dim" style="font-size:12px;line-height:1.6">' + esc(capFirst(translateLegacyText("The enhanced view sharpens detail already in the photo so faint scratches and edge wear read more clearly. It does not add detail beyond what the camera captured."))) + '</p></div>';
   })();
+  html += quadCheckHtml();
   html += defectSummaryHtml(markersFrontResult.concat(markersBackResult));
   /* Temuan */
   html += '<div><p class="kicker">[ Temuan per Area ]</p><h3 class="fd" style="margin-top:0.25rem;font-size:18px;font-weight:700">Which parts are not so good?</h3>' +
