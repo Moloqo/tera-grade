@@ -1,4 +1,4 @@
-// refresh-market-files.mjs — TEG v27.7 Fase 1b (job harian, GitHub Actions)
+// refresh-market-files.mjs — TEG v27.11 (job harian, GitHub Actions)
 // ---------------------------------------------------------------------------
 // What this does (see design spec §5.5) — TCGCSV-ONLY in this round:
 //   1. Downloads the TCGCSV per-group PRICES file (TCGCSV_URL, must end
@@ -33,6 +33,19 @@
 //      round could prefer Normal explicitly.
 //   4. Refreshes `fx_rates` from exchangerate-api.com (old values are kept
 //      when that fetch fails).
+//   5. NEW in v27.11 — writes one DAILY SNAPSHOT per card into
+//      `price_snapshots` (sql/003_price_snapshots.sql): reads the
+//      just-upserted `tcgplayer_prices` rows (card_key + market NOT
+//      NULL) plus `cardmarket_prices` rows when CARDMARKET_ENABLED,
+//      reads `fx_rates`, and computes the headline IDR with the SAME
+//      rule as market-prices (logic.ts): TCGCSV market x USD_IDR,
+//      else Cardmarket trend x EUR_IDR. Rows with no computable price
+//      are SKIPPED, never written (no null-price snapshot, never a
+//      guessed price). Upsert on (card_key, snapshot_date) with
+//      merge-duplicates, so a same-day re-run is idempotent. Runs
+//      AFTER steps 3 + 4 in the same job, so it always snapshots the
+//      freshest tables. No eBay call is added to the job (keys land
+//      separately; the market-prices function already owns eBay).
 //
 // Failure policy (spec §5.5 + task): ANY download/upstream failure is
 // logged as a warning and the script exits 0. Yesterday's tables stay in
@@ -143,7 +156,7 @@ const log = (...a) => console.log(`[refresh-market-files]`, ...a);
 const warn = (...a) => console.warn(`[refresh-market-files] WARNING:`, ...a);
 const error = (...a) => console.error(`[refresh-market-files] ERROR:`, ...a);
 
-const summary = { cardmarket: null, tcgcsv: null, fx: null };
+const summary = { cardmarket: null, tcgcsv: null, fx: null, snapshots: null };
 
 // --- Small fetch helpers ---------------------------------------------------
 
@@ -175,10 +188,11 @@ function sbHeaders() {
   };
 }
 
-async function sbGetTable(table, select) {
+async function sbGetTable(table, select, extraQuery = "") {
   const url =
     `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/${table}` +
-    `?select=${encodeURIComponent(select)}`;
+    `?select=${encodeURIComponent(select)}` +
+    (extraQuery ? `&${extraQuery}` : "");
   const res = await fetchWithTimeout(url, { headers: sbHeaders() }, 30_000);
   if (!res.ok) {
     throw new Error(`Supabase GET ${table} failed: HTTP ${res.status} ${await res.text().then((t) => t.slice(0, 200)).catch(() => "")}`);
@@ -666,6 +680,161 @@ async function refreshFx() {
   }
 }
 
+// --- Step 5 (NEW in v27.11): daily price snapshots -------------------------
+// Writes ONE row per card per day into `price_snapshots`
+// (sql/003_price_snapshots.sql) — the history the native app's price-trend
+// chart reads through market-prices ?history=1.
+//
+// Sources, in the SAME headline order as market-prices (logic.ts):
+//   1. TCGCSV market (USD) x USD_IDR  -> source "tcgcsv"
+//   2. Cardmarket trend (EUR) x EUR_IDR -> source "cardmarket"
+//      (only when CARDMARKET_ENABLED; the Cardmarket step is still
+//      deferred this round, so this leg is normally empty)
+//   eBay is NOT a job source: no eBay call here (keys land separately;
+//   the market-prices function already owns the eBay path). ebay_usd
+//   is always written NULL.
+//
+// Honesty rules (same as 001/003 — do not weaken):
+//   * A row is written ONLY when a real upstream price exists AND a real
+//     FX rate exists to convert it. No price -> SKIP the card (never a
+//     null-price snapshot). No FX -> SKIP the whole step (never convert
+//     with the 16500 display fallback — a permanent history row must
+//     never be built on a guessed rate).
+//   * market <= 0 counts as "no price" (same as logic.ts toNum, which
+//     rejects zero/negative) — a 0 market price is upstream noise, not
+//     a price the chart should show.
+//   * Reads the tables the earlier steps JUST refreshed, so a snapshot
+//     always reflects today's import, not yesterday's.
+//   * Upsert on (card_key, snapshot_date) with merge-duplicates: a
+//     same-day re-run overwrites that day's row instead of duplicating
+//     it (idempotent). DRY_RUN logs, writes nothing (via sbUpsert).
+//   * If `price_snapshots` does not exist yet (003 not applied), the
+//     read fails: warn + skip, do NOT fail the job — steps 1-4 already
+//     ran and yesterday's tables stay in use.
+
+async function refreshPriceSnapshots() {
+  const date = todayISO();
+
+  // FX first: without a real USD_IDR there is no honest conversion.
+  let fxRows;
+  try {
+    fxRows = await sbGetTable("fx_rates", "pair,rate");
+  } catch (e) {
+    warn(`Snapshots: could not read fx_rates (${e.message}) — cannot convert prices honestly. Skipping snapshot step; steps 1-4 already ran.`);
+    summary.snapshots = "skipped: fx_rates unreadable";
+    return;
+  }
+  const usdIdr = toNumber(fxRows.find((r) => r.pair === "USD_IDR")?.rate);
+  const eurIdr = toNumber(fxRows.find((r) => r.pair === "EUR_IDR")?.rate);
+  if (usdIdr === undefined || usdIdr <= 0) {
+    warn("Snapshots: no usable USD_IDR row in fx_rates — cannot compute price_idr honestly (the 16500 display fallback is NEVER used for history). Skipping snapshot step.");
+    summary.snapshots = "skipped: no USD_IDR in fx_rates";
+    return;
+  }
+
+  // TCGCSV leg: only rows the Edge Function can look up (card_key set)
+  // with a real market price. PostgREST filters do the first cut;
+  // toNumber() below does the second (market <= 0 / unreadable).
+  let tcgRows;
+  try {
+    tcgRows = await sbGetTable(
+      "tcgplayer_prices",
+      "card_key,market,low,mid,high",
+      "card_key=not.is.null&market=not.is.null",
+    );
+  } catch (e) {
+    warn(`Snapshots: could not read tcgplayer_prices (${e.message}) — the price_snapshots table probably does not exist yet (apply sql/003_price_snapshots.sql first) or the read failed. Skipping snapshot step; steps 1-4 already ran.`);
+    summary.snapshots = "skipped: tcgplayer_prices unreadable (003 not applied?)";
+    return;
+  }
+
+  // Cardmarket leg (only when the Cardmarket step ran this round).
+  const cmByKey = new Map();
+  if (CARDMARKET_ENABLED) {
+    try {
+      const cmRows = await sbGetTable(
+        "cardmarket_prices",
+        "card_key,trend,avg,low",
+        "card_key=not.is.null&trend=not.is.null",
+      );
+      for (const r of cmRows) cmByKey.set(r.card_key, r);
+      log(`Snapshots: Cardmarket leg has ${cmByKey.size} rows with card_key + trend`);
+    } catch (e) {
+      warn(`Snapshots: could not read cardmarket_prices (${e.message}) — continuing TCGCSV-only; Cardmarket legs will be NULL this run.`);
+    }
+  }
+
+  const rows = [];
+  const seen = new Set();
+  let skippedNoPrice = 0;
+  for (const r of tcgRows) {
+    const market = toNumber(r.market);
+    if (market === undefined || market <= 0) { skippedNoPrice++; continue; }
+    const cm = cmByKey.get(r.card_key);
+    rows.push({
+      card_key: r.card_key,
+      snapshot_date: date,
+      tcgplayer_market_usd: market,
+      tcgplayer_low_usd: toNumber(r.low) ?? null,
+      tcgplayer_mid_usd: toNumber(r.mid) ?? null,
+      tcgplayer_high_usd: toNumber(r.high) ?? null,
+      cardmarket_trend_eur: cm ? (toNumber(cm.trend) ?? null) : null,
+      cardmarket_avg_eur: cm ? (toNumber(cm.avg) ?? null) : null,
+      cardmarket_low_eur: cm ? (toNumber(cm.low) ?? null) : null,
+      ebay_usd: null, // no eBay feed in the job yet — never guessed
+      fx_usd_idr: usdIdr,
+      fx_eur_idr: eurIdr ?? null,
+      price_idr: Math.round(market * usdIdr),
+      source: "tcgcsv",
+    });
+    seen.add(r.card_key);
+  }
+
+  // Cardmarket-only cards (no TCGCSV row): headline from trend x EUR_IDR.
+  // Needs a real EUR_IDR — without it these cards are skipped, never
+  // converted with a guessed rate.
+  let cmOnly = 0;
+  let cmOnlySkippedNoFx = 0;
+  if (CARDMARKET_ENABLED && cmByKey.size > 0) {
+    for (const [key, cm] of cmByKey) {
+      if (seen.has(key)) continue;
+      const trend = toNumber(cm.trend);
+      if (trend === undefined || trend <= 0) { skippedNoPrice++; continue; }
+      if (eurIdr === undefined || eurIdr <= 0) { cmOnlySkippedNoFx++; continue; }
+      rows.push({
+        card_key: key,
+        snapshot_date: date,
+        tcgplayer_market_usd: null,
+        tcgplayer_low_usd: null,
+        tcgplayer_mid_usd: null,
+        tcgplayer_high_usd: null,
+        cardmarket_trend_eur: trend,
+        cardmarket_avg_eur: toNumber(cm.avg) ?? null,
+        cardmarket_low_eur: toNumber(cm.low) ?? null,
+        ebay_usd: null, // no eBay feed in the job yet — never guessed
+        fx_usd_idr: usdIdr,
+        fx_eur_idr: eurIdr,
+        price_idr: Math.round(trend * eurIdr),
+        source: "cardmarket",
+      });
+      cmOnly++;
+    }
+    if (cmOnlySkippedNoFx > 0) {
+      warn(`Snapshots: ${cmOnlySkippedNoFx} Cardmarket-only card(s) SKIPPED — no usable EUR_IDR in fx_rates, so trend (EUR) cannot be converted honestly.`);
+    }
+  }
+
+  log(`Snapshots: ${tcgRows.length} tcgplayer rows read, ${rows.length} snapshot rows to write (${rows.length - cmOnly} tcgcsv + ${cmOnly} cardmarket-only), ${skippedNoPrice} no-price skipped, date ${date}, USD_IDR=${usdIdr}${eurIdr !== undefined ? `, EUR_IDR=${eurIdr}` : ""}`);
+  if (DRY_RUN && rows.length > 0) {
+    for (const r of rows.slice(0, 3)) {
+      log(`Snapshots DRY_RUN sample: ${r.card_key} price_idr=${r.price_idr} source=${r.source}`);
+    }
+  }
+  const written = await sbUpsert("price_snapshots", rows);
+  summary.snapshots = `upserted ${written} rows (${rows.length - cmOnly} tcgcsv + ${cmOnly} cardmarket-only, ${skippedNoPrice} no-price skipped)`;
+  log(`Snapshots: ${summary.snapshots}`);
+}
+
 // --- Main ---------------------------------------------------------------------
 
 async function main() {
@@ -706,6 +875,12 @@ async function main() {
   catch (e) { warn(`TCGCSV step failed (${e.message}) — yesterday's tcgplayer_prices stay in use.`); summary.tcgcsv = `failed (soft): ${e.message}`; }
 
   await refreshFx();
+
+  // Snapshots run LAST: they read the tables steps 3 + 4 just refreshed,
+  // so one run's snapshot always reflects that run's import + FX.
+  try { await refreshPriceSnapshots(); }
+  catch (e) { warn(`Snapshots step failed (${e.message}) — no snapshots written this run; steps 1-4 already ran and yesterday's tables stay in use.`); summary.snapshots = `failed (soft): ${e.message}`; }
+
   printSummary();
 }
 
@@ -715,6 +890,7 @@ function printSummary() {
     `- Cardmarket: ${summary.cardmarket ?? "not run"}`,
     `- TCGCSV: ${summary.tcgcsv ?? "not run"}`,
     `- FX: ${summary.fx ?? "not run"}`,
+    `- Snapshots: ${summary.snapshots ?? "not run"}`,
     `- Date (UTC): ${todayISO()} — DRY_RUN=${DRY_RUN}`,
     "",
     "A failed/skipped step leaves yesterday's table in use; the UI shows the observation date.",
