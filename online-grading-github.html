@@ -5456,6 +5456,14 @@ const state = {
   qualityConfirm: false,
   scanPhases: [],
   revealed: false,
+  /* v27.9.4 · summary-first report: which view is open. reportFull =
+     ?report= page, resultFull = grading-tab result. Both default false
+     (summary); only the Full Report button sets them true. They survive
+     re-renders (market refresh, save-correction, photo-side toggles)
+     because renderReport/renderResultHtml never reset them — only the
+     entry points below do. */
+  reportFull: false,
+  resultFull: false,
   det: null,
   values: { raw: 0, g9: 0, g10: 0, atGrade: 0 },
   analysis: null,
@@ -6324,7 +6332,7 @@ function evidenceDetail(kind, ev) {
   if (!ev.surface) return undefined;
   return "suspicious cells of " + ev.surface.badCells + " of " + ev.surface.totalCells + " grid cells · highest texture energy " + ev.surface.worstEnergy + " (threshold " + (ev.surface.threshold != null ? ev.surface.threshold : 42) + (ev.surface.holo ? ", holo pattern" : "") + ")";
 }
-function qrPanelHtml(id, compact) {
+function qrPanelHtml(id, compact, hideButton) {
   const url = reportUrl(id);
   const svg = qrSvg(url, compact ? 104 : 136);
   return '<div class="slab-frame card" style="border-radius:1.25rem"><div style="display:flex;flex-direction:column;gap:0.75rem" class="qr-flex">' +
@@ -6334,10 +6342,17 @@ function qrPanelHtml(id, compact) {
     '<h3 class="fd" style="margin-top:0.25rem;font-size:18px;font-weight:700;line-height:1.35">Scan QR — where your card\'s defects are</h3>' +
     '<p style="margin-top:0.375rem;display:flex;gap:0.5rem;flex-wrap:wrap"><span class="tg-icochip">▦ Scan for full report</span><span class="tg-icochip">🔍 Defects + photos + bands</span></p>' +
     (SB.enabled ? "" : '<p style="margin-top:0.375rem"><span class="tg-icochip warn"><span class="dot"></span>Demo mode: the report only opens from this tab while the session runs — paste the tera-grade Supabase anon key to scan it from another phone.</span></p>') +
+    (hideButton ? "" :
     '<div class="row-wrap mt2">' +
     '<button type="button" data-action="open-report" data-id="' + esc(String(id)) + '" class="fc" style="border-radius:999px;border:1px solid var(--accent);background:transparent;color:var(--accent-deep);padding:0.5rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.5rem">Open full report</button>' +
-    "</div></div></div></div>" +
+    "</div>") + "</div></div></div>" +
     '<style>@media (min-width:480px){.qr-flex{flex-direction:row !important;align-items:center}}</style>';
+}
+/* v27.9.4 · the single prominent Full Report CTA used by both summary
+   views (report page + grading-tab result). Gold, full-width, same sizing
+   as the "Grade another card" button. */
+function fullReportBtnHtml() {
+  return '<button type="button" data-action="show-full-report" class="btn-gold fd" style="width:100%;border-radius:999px;padding:0.875rem 1rem;font-size:18px;font-weight:700;min-height:56px">Full Report</button>';
 }
 function gradeCellHtml(overall, label) {
   return '<span class="panel-ink grade-cell"><span class="fd" style="font-size:26px;font-weight:900;line-height:1;color:' + gradeColor(overall) + '">' + (overall > 0 ? fmtScore(overall) : "—") + '</span>' +
@@ -8013,6 +8028,7 @@ function resetGrading() {
   state.detectError = ""; state.photoSide = "front";
   state.enhance = null; state.enhanceView = "after"; state.quadChallenge = null;
   state.revealed = false;
+  state.resultFull = false; /* v27.9.4 */
   state._sampleLoaded = false;
   /* Reset berarti mulai bersih — draf sesi ikut dibuang agar tidak
      bangkit lagi saat halaman Grading dibuka kembali. */
@@ -8230,6 +8246,10 @@ function renderResultHtml() {
      cover, karena tidak ada grade untuk dibuka. */
   if (!state.revealed && !(a && a.notDetected)) return revealCoverHtml();
   const ev = a.evidence;
+  /* v27.9.4 · shared cfg/scores for tiles + radar — the summary and the
+     full view render from the same objects, so the tiles cannot drift. */
+  const subCfg = { overall: a.overall, gradeLabel: gradeLabelFor(a.overall), scores: { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score, structure: a.structure && typeof a.structure.score === "number" ? a.structure.score : null }, findings: a.findings || [], sideScores: state.sideScores || null, centeringDetail: (a.centering.lrText && a.centering.tbText) ? { lrText: a.centering.lrText, tbText: a.centering.tbText } : null, centeringCombine: a.centering.combine || null, centeringEstimated: Boolean(ev && ev.centering && ev.centering.estimated), singleSide: (function () { const un = Array.isArray(a.unmeasuredSides) ? a.unmeasuredSides : []; const frontOnly = !state.back || un.indexOf("back") >= 0; const backOnly = !state.front || un.indexOf("front") >= 0; return frontOnly && !backOnly ? "front" : (backOnly && !frontOnly ? "back" : null); })(), conf: null };
+  const radarScores = { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score, structure: a.structure && typeof a.structure.score === "number" ? a.structure.score : null };
   let html = '<div class="mt3 stack-lg">';
   /* Gerbang K1: panel penolakan — tanpa slab grade (a.overall null). */
   if (a && a.notDetected) {
@@ -8264,6 +8284,21 @@ function renderResultHtml() {
   } else {
     html += '<div class="tg-empty"><p class="tg-empty-ico">▦</p><p class="tg-empty-t">QR not ready yet</p><p class="tg-empty-s" data-qr-note>This result is not saved yet — no QR. Check the connection, then grade again.</p></div>';
   }
+  /* v27.9.4 · SUMMARY-FIRST (default): QR + Full Report button + the five
+     tiles + the radar — nothing else. Correction form, breakdown cards,
+     defect map, enhancement, findings, market slab and trust live ONLY
+     in the full view below. The QR / QR-not-ready block above stays, so
+     data-qr-note keeps working for syncDirtyUi (T-64). */
+  if (!state.resultFull) {
+    html += fullReportBtnHtml();
+    html += subgradeTilesHtml(subCfg);
+    html += radarSectionHtml(radarScores, ev && ev.structure);
+    html += '<div class="tg-stickybar"><button type="button" data-action="refresh-market" class="btn-ghost">↻ Refresh market</button><button type="button" data-action="reset-grading" class="btn-gold fd">Grade another card</button></div>';
+    html += "</div>";
+    return html;
+  }
+  /* v27.9.4 · FULL view: a way back to the summary at the very top. */
+  html = html.replace('<div class="mt3 stack-lg">', '<div class="mt3 stack-lg"><button type="button" data-action="show-summary" class="fc" style="margin-bottom:0.75rem;border-radius:999px;border:1px solid var(--border);background:transparent;color:var(--dim);padding:0.5rem 0.875rem;font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;min-height:2.5rem">← Back to summary</button>');
   /* Identitas — bisa dikoreksi */
   const confChip = confidenceChipStyle(det);
   const confText = det.confidence > 0 ? "Detection confidence " + det.confidence + "%" : "Manual identity";
@@ -8329,8 +8364,8 @@ function renderResultHtml() {
   const countsFrontResult = defectVisibleCounts(markersFrontResult);
   const countsBackResult = defectVisibleCounts(markersBackResult);
   html += '<div><h3 class="fd" style="font-size:18px;font-weight:700">Condition analysis from photos</h3>' +
-    subgradesCardHtml({ overall: a.overall, gradeLabel: gradeLabelFor(a.overall), scores: { centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score, structure: a.structure && typeof a.structure.score === "number" ? a.structure.score : null }, findings: a.findings || [], sideScores: state.sideScores || null, centeringDetail: (a.centering.lrText && a.centering.tbText) ? { lrText: a.centering.lrText, tbText: a.centering.tbText } : null, centeringCombine: a.centering.combine || null, centeringEstimated: Boolean(ev && ev.centering && ev.centering.estimated), singleSide: (function () { const un = Array.isArray(a.unmeasuredSides) ? a.unmeasuredSides : []; const frontOnly = !state.back || un.indexOf("back") >= 0; const backOnly = !state.front || un.indexOf("front") >= 0; return frontOnly && !backOnly ? "front" : (backOnly && !frontOnly ? "back" : null); })(), conf: null }) +
-    radarSectionHtml({ centering: a.centering.score, corners: a.corners.score, edges: a.edges.score, surface: a.surface.score, structure: a.structure && typeof a.structure.score === "number" ? a.structure.score : null }) +
+    subgradesCardHtml(subCfg) +
+    radarSectionHtml(radarScores, ev && ev.structure) +
     '<div class="mt2" style="display:grid;gap:0.75rem" id="subGrid">' +
     '<div id="rep-break-centering">' + subgradeCardHtml({ title: "CENTERING", score: a.centering.score, reason: a.centering.reason, extra: "Left–right " + a.centering.lrText + " · Top–bottom " + a.centering.tbText, detail: evidenceDetail("centering", ev), note: a.centering.combine === "avg-v1" ? "Centering combined by average (v1)" : undefined }) + "</div>" +
     '<div id="rep-break-corners">' + subgradeCardHtml({ title: "CORNERS", score: a.corners.score, reason: a.corners.reason, detail: evidenceDetail("corners", ev) }) + "</div>" +
@@ -9003,10 +9038,26 @@ function radarChartHtml(scores) {
     labelEls +
     "</svg>";
 }
-function radarSectionHtml(scores) {
+/* v27.9.4 · the honest "why no Structure score" text — the SAME code→text
+   mapping as gradeBreakdownHtml and the renderResultHtml STRUCTURE card,
+   factored out so the radar caption cannot drift from the breakdown. */
+function structureNotScoredText(st) {
+  const sCode = st && st.reason;
+  return sCode === "sleeve-unreliable" ? "Structure not scored — outline unreliable." : st && st.estimateReason === "clutter" ? "Structure not scored — edge signal dominated by sleeve/design lines. A photo without a sleeve gives a number." : sCode === "manual-override" ? "Structure not scored — corners corrected by hand." : sCode === "quad-failed" ? "Structure not scored — outline not detected." : "Structure not scored — measurement could not run.";
+}
+function radarSectionHtml(scores, structureEvidence) {
   const hasStructure = typeof scores.structure === "number";
-  const structureNote = hasStructure ? "" :
-    '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;text-align:center">Structure: not measured before v27.6.</p>';
+  let structureNote = "";
+  if (!hasStructure) {
+    /* v27.9.4 · caption fix: a null Structure WITH stored evidence means
+       the measurement ran but was held (estimated) — say why, using the
+       same mapping as the breakdown. No evidence at all = a pre-v27.6
+       entry, which keeps the old wording verbatim. */
+    const st = (structureEvidence && typeof structureEvidence === "object") ? structureEvidence : null;
+    structureNote = st
+      ? '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;text-align:center">' + esc(structureNotScoredText(st)) + "</p>"
+      : '<p class="dim" style="margin:0.5rem 0 0;font-size:12px;text-align:center">Structure: not measured before v27.6.</p>';
+  }
   return '<section aria-label="Sub-grade radar" style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:1rem;margin-top:32px">' +
     '<h2 style="font-family:var(--font-sans);font-weight:700;font-size:14px;color:#fff;margin:0 0 .75rem">Sub-grade balance</h2>' +
     radarChartHtml(scores) +
@@ -9142,6 +9193,25 @@ async function renderReport(id) {
     '<p style="margin-top:0.25rem;font-size:12px;line-height:1.6;color:var(--dim)">' + esc([pg.setName, pg.year, pg.cardNumber ? "#" + pg.cardNumber : "", translateLegacyValue(pg.rarity), translateLegacyValue(pg.language), translateLegacyValue(pg.category)].filter(Boolean).join(" · ")) + "</p>" +
     '<p style="margin-top:0.25rem;font-size:11px;color:var(--dim)">Graded ' + fmtDate(pg.createdAt) + (pg.confidence > 0 ? " · detection " + pg.confidence + "%" : "") + (detail.identStatus && detail.identStatus.needsConfirm ? ' · <strong style="color:#ff9d8a">NEEDS CONFIRMATION</strong>' : "") + "</p></div>" +
     '<div style="padding:1rem">' + reportHeroHtml({ photoUrl: pg.frontUrl || pg.backUrl || null, overall: pg.overall, gradeLabel: pg.gradeLabel }) + "</div></header>";
+  /* v27.9.4 · shared cfg/scores for tiles + radar — the summary and the
+     full view render from the same objects, so the tiles cannot drift. */
+  const subCfg = { overall: pg.overall, gradeLabel: pg.gradeLabel, scores: { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface, structure: pg.structure }, findings: findings, sideScores: null, centeringDetail: detail.centeringDetail || null, centeringCombine: detail.centeringCombine || null, centeringEstimated: Boolean(detail.evidence && detail.evidence.centering && detail.evidence.centering.estimated), singleSide: (function () { const un = Array.isArray(detail.unmeasuredSides) ? detail.unmeasuredSides : []; const frontOnly = !pg.backUrl || un.indexOf("back") >= 0; const backOnly = !pg.frontUrl || un.indexOf("front") >= 0; return frontOnly && !backOnly ? "front" : (backOnly && !frontOnly ? "back" : null); })(), conf: reportConfidence(pg, detail) };
+  const radarScores = { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface, structure: pg.structure };
+  /* v27.9.4 · SUMMARY-FIRST (default): back button + header + QR + Full
+     Report button + the five tiles + the radar — nothing else. The QR
+     panel's own button is suppressed here (hideButton) so the prominent
+     Full Report button is the single CTA. */
+  if (!state.reportFull) {
+    html += '<div>' + qrPanelHtml(pg.id, false, true) + '</div>';
+    html += fullReportBtnHtml();
+    html += subgradeTilesHtml(subCfg);
+    html += radarSectionHtml(radarScores, detail.evidence && detail.evidence.structure);
+    html += '<div class="tg-stickybar"><button type="button" data-action="close-report" class="btn-ghost">← Back</button><button type="button" data-action="refresh-market" class="btn-ghost">↻ Refresh market</button><button type="button" data-action="close-report" class="btn-gold fd">Grade another card</button></div>';
+    html += "</div>";
+    root.innerHTML = html;
+    if (typeof initAnims === "function") initAnims(root);
+    return;
+  }
   if (detail.identStatus && detail.identStatus.needsConfirm) {
     html += '<p role="alert" style="border:1px solid #cf5138;border-radius:0.75rem;background:var(--surface);padding:0.75rem 0.875rem;font-size:13.5px;line-height:1.65;color:#e0684f;margin:0"><strong>Identity needs confirmation.</strong> ' + esc((detail.identStatus.flags && detail.identStatus.flags.length ? capFirst(translateLegacyText(detail.identStatus.flags.join(" "))) : "Card detection confidence was below 60% at grading.") ) + "</p>";
   }
@@ -9186,8 +9256,8 @@ async function renderReport(id) {
       }).join("") + "</div><style>@media (min-width:640px){#zoomGrid{grid-template-columns:1fr 1fr}}</style>";
     }
     html += "</section>";
-    html += subgradesCardHtml({ overall: pg.overall, gradeLabel: pg.gradeLabel, scores: { centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface, structure: pg.structure }, findings: findings, sideScores: null, centeringDetail: detail.centeringDetail || null, centeringCombine: detail.centeringCombine || null, centeringEstimated: Boolean(detail.evidence && detail.evidence.centering && detail.evidence.centering.estimated), singleSide: (function () { const un = Array.isArray(detail.unmeasuredSides) ? detail.unmeasuredSides : []; const frontOnly = !pg.backUrl || un.indexOf("back") >= 0; const backOnly = !pg.frontUrl || un.indexOf("front") >= 0; return frontOnly && !backOnly ? "front" : (backOnly && !frontOnly ? "back" : null); })(), conf: reportConfidence(pg, detail) });
-    html += radarSectionHtml({ centering: pg.centering, corners: pg.corners, edges: pg.edges, surface: pg.surface, structure: pg.structure });
+    html += subgradesCardHtml(subCfg);
+    html += radarSectionHtml(radarScores, detail.evidence && detail.evidence.structure);
     html += gradeBreakdownHtml(pg, detail, findings, allMarkers);
     /* v27.4 · Trust & Authenticity (first-pass checks — never change the grade). */
     html += trustSectionHtml({ trim: detail.trim || null, fingerprint: detail.fingerprint || null, anomaly: detail.anomaly || null, fingerprintMatch: detail.fingerprintMatch || null, overall: pg.overall, valueRaw: pg.valueRaw, valueGrade9: pg.valueGrade9, valueGrade10: pg.valueGrade10, valueAtGrade: pg.valueAtGrade, pop: null, showSnapshot: true, market: (state.reportMarket && String(state.reportMarket.id) === String(pg.id) ? state.reportMarket.market : (detail.market || null)), det: pg, marketLoading: state.reportMarketLoading });
@@ -9240,7 +9310,7 @@ async function renderReport(id) {
   }
   html += '<details class="tg-coll"><summary>About this report</summary><p class="tg-footnote">Auto-generated from photo analysis (Analysis Standard ' + esc(brand()) + '). A condition estimate — missed defects can make it differ from physical inspection.</p></details>';
   html += understandReportHtml();
-  html += '<div class="tg-stickybar"><button type="button" data-action="close-report" class="btn-ghost">← Back</button><button type="button" data-action="refresh-market" class="btn-ghost">↻ Refresh market</button><button type="button" data-action="close-report" class="btn-gold fd">Grade another card</button></div>';
+  html += '<div class="tg-stickybar"><button type="button" data-action="close-report" class="btn-ghost">← Back</button><button type="button" data-action="refresh-market" class="btn-ghost">↻ Refresh market</button><button type="button" data-action="exit-report" class="btn-gold fd">Grade another card</button></div>';
   html += "</div>";
   root.innerHTML = html;
   if (typeof initAnims === "function") initAnims(root);
@@ -9289,10 +9359,11 @@ function openReport(id) {
      tanpa reload dan tanpa menyalin URL halaman sendiri. */
   try { history.pushState(null, "", "?report=" + encodeURIComponent(String(id))); } catch (e) {}
   state.reportSide = "front";
+  state.reportFull = false; /* v27.9.4: ?report=/QR always lands on the summary first */
   void renderReport(id);
 }
 function closeReport() {
-  state.reportId = null; state.reportMarket = null; /* v27.7 */
+  state.reportId = null; state.reportMarket = null; state.reportFull = false; /* v27.7 + v27.9.4 */
   try { history.pushState(null, "", "#grading"); } catch (e) {}
   const rr = $("#reportRoot");
   if (rr) { rr.classList.add("hidden"); rr.innerHTML = ""; }
@@ -9302,7 +9373,7 @@ function closeReport() {
 }
 window.addEventListener("popstate", function () {
   const rid = new URLSearchParams(window.location.search).get("report");
-  if (rid) { state.reportSide = "front"; void renderReport(rid); return; }
+  if (rid) { state.reportSide = "front"; state.reportFull = false; /* v27.9.4: browser Back / reload lands on the summary */ void renderReport(rid); return; }
   const rr = $("#reportRoot");
   if (rr && !rr.classList.contains("hidden")) closeReport();
 });
@@ -9608,6 +9679,7 @@ document.addEventListener("click", (e) => {
     swapPhotoSides();
   } else if (action === "reveal-grade") {
     state.revealed = true;
+    state.resultFull = false; /* v27.9.4: a newly revealed result starts on the summary */
     renderTab();
     /* v27.9.2: auto-save after Reveal (races the market fetch, then
        saves — see autoSaveAfterReveal). v27.7: the market snapshot is
@@ -9698,9 +9770,56 @@ document.addEventListener("click", (e) => {
   } else if (action === "reset-grading") {
     resetGrading();
   } else if (action === "open-report") {
-    openReport(target.getAttribute("data-id"));
+    /* v27.9.4: the QR panel's own button. On the report page itself it
+       opens the FULL view for that report; anywhere else it opens the
+       report page — which lands on the summary. */
+    const rid = target.getAttribute("data-id");
+    const rr = $("#reportRoot");
+    if (rr && !rr.classList.contains("hidden") && String(state.reportId) === String(rid)) {
+      state.reportFull = true;
+      void renderReport(rid);
+      window.scrollTo(0, 0);
+    } else {
+      openReport(rid);
+    }
   } else if (action === "close-report") {
+    /* v27.9.4: in the FULL view, Back returns to the summary; in the
+       summary it exits the report (as before). Leaving the report
+       entirely stays on "Grade another card" (exit-report). */
+    const rr = $("#reportRoot");
+    if (rr && !rr.classList.contains("hidden") && state.reportFull && state.reportId != null) {
+      state.reportFull = false;
+      void renderReport(state.reportId);
+      window.scrollTo(0, 0);
+    } else {
+      closeReport();
+    }
+  } else if (action === "exit-report") {
+    /* v27.9.4: "Grade another card" in the full view — exits the report. */
     closeReport();
+  } else if (action === "show-full-report") {
+    /* v27.9.4: the prominent Full Report button — report page or
+       grading-tab result, whichever view is open. */
+    const rr = $("#reportRoot");
+    if (rr && !rr.classList.contains("hidden") && state.reportId != null) {
+      state.reportFull = true;
+      void renderReport(state.reportId);
+    } else {
+      state.resultFull = true;
+      renderTab();
+    }
+    window.scrollTo(0, 0);
+  } else if (action === "show-summary") {
+    /* v27.9.4: "← Back to summary" at the top of the full result view. */
+    const rr = $("#reportRoot");
+    if (rr && !rr.classList.contains("hidden") && state.reportId != null) {
+      state.reportFull = false;
+      void renderReport(state.reportId);
+    } else {
+      state.resultFull = false;
+      renderTab();
+    }
+    window.scrollTo(0, 0);
   } else if (action === "refresh-market") {
     void refreshMarketData();
   } else if (action === "report-side") {
@@ -9805,6 +9924,7 @@ if (typeof loadSample === "function") {
   if (raw) {
     /* Laporan QR lama (?report=<id>) tetap dibuka langsung sebagai laporan. */
     state.reportSide = "front";
+    state.reportFull = false; /* v27.9.4: ?report= on load lands on the summary */
     void renderReport(raw);
     dismissSplash();
     return;
